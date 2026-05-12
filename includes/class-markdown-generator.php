@@ -1,0 +1,738 @@
+<?php
+/**
+ * Fetches rendered HTML and converts main content to Markdown.
+ *
+ * @package Singular_Markdown
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+/**
+ * Class Singular_Markdown_Generator
+ */
+class Singular_Markdown_Generator {
+
+	/**
+	 * Default CSS selectors / tag names to strip from main content.
+	 *
+	 * @return string[]
+	 */
+	public static function default_excluded_selectors() {
+		$selectors = array(
+			'header',
+			'footer',
+			'nav',
+			'script',
+			'style',
+			'noscript',
+			'iframe',
+			'svg',
+			'form',
+			'.breadcrumbs-area',
+			'.toc',
+			'.news-single__meta',
+			'.news-single__meta_bottom',
+			'.news-single__share-lnk',
+			'.navbar-toggler',
+			'.start',
+		);
+
+		$opts = Singular_Markdown_Settings::get_options();
+		$raw  = isset( $opts['extra_strip_selectors'] ) ? (string) $opts['extra_strip_selectors'] : '';
+		foreach ( Singular_Markdown_Settings::parse_selector_lines( $raw ) as $sel ) {
+			if ( ! in_array( $sel, $selectors, true ) ) {
+				$selectors[] = $sel;
+			}
+		}
+
+		/**
+		 * Additional selectors (tags, #id, or .class) removed before Markdown conversion.
+		 *
+		 * @param string[] $selectors Selector list.
+		 */
+		return apply_filters( 'singular_markdown_excluded_selectors', $selectors );
+	}
+
+	/**
+	 * CSS selectors for main HTML fragment extraction (tag, #id, or .class per line).
+	 *
+	 * @return string[]
+	 */
+	public static function get_main_content_selector_candidates() {
+		$opts = Singular_Markdown_Settings::get_options();
+		$raw  = isset( $opts['main_content_selectors'] ) ? (string) $opts['main_content_selectors'] : '';
+		$lines = Singular_Markdown_Settings::parse_selector_lines( $raw );
+
+		$defaults = array(
+			'.main-wrap',
+			'main',
+			'article',
+			'.entry-content',
+			'.wp-block-post-content',
+		);
+
+		$merged = array();
+		foreach ( array_merge( $lines, $defaults ) as $sel ) {
+			$sel = trim( (string) $sel );
+			if ( '' === $sel ) {
+				continue;
+			}
+			if ( ! in_array( $sel, $merged, true ) ) {
+				$merged[] = $sel;
+			}
+		}
+
+		/**
+		 * Selectors tried in order when extracting main content from rendered HTML.
+		 *
+		 * @param string[] $selectors Selector list (tag, #id, or .class).
+		 */
+		return apply_filters( 'singular_markdown_main_content_selectors', $merged );
+	}
+
+	/**
+	 * Build Markdown for a post and write to cache.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return string|false Markdown or false on failure.
+	 */
+	public static function generate_and_cache( $post_id ) {
+		$post_id = (int) $post_id;
+		if ( $post_id <= 0 ) {
+			return false;
+		}
+
+		if ( ! Singular_Markdown_Post_Type_Registry::is_post_eligible( $post_id ) ) {
+			Singular_Markdown_Storage::delete( $post_id );
+			return false;
+		}
+
+		if ( Singular_Markdown_Post_Options::uses_custom_markdown( $post_id ) ) {
+			$md = Singular_Markdown_Post_Options::get_filtered_custom_markdown( $post_id );
+			if ( false === $md || '' === trim( (string) $md ) ) {
+				return false;
+			}
+			Singular_Markdown_Storage::write( $post_id, $md );
+			return $md;
+		}
+
+		$md = self::generate_markdown( $post_id );
+		if ( false === $md || '' === $md ) {
+			return false;
+		}
+
+		Singular_Markdown_Storage::write( $post_id, $md );
+		return $md;
+	}
+
+	/**
+	 * Produce Markdown string for a post.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return string|false
+	 */
+	public static function generate_markdown( $post_id ) {
+		$post_id = (int) $post_id;
+		$post    = get_post( $post_id );
+		if ( ! $post ) {
+			return false;
+		}
+
+		$html = self::fetch_rendered_html( $post_id );
+		if ( false === $html || '' === $html ) {
+			$html = self::fallback_content_html( $post_id );
+		}
+
+		$fragment = self::extract_main_fragment_html( $html );
+		if ( '' === $fragment ) {
+			$fragment = self::fallback_content_html( $post_id );
+		}
+
+		$dom = self::html_to_dom( $fragment );
+		if ( ! $dom ) {
+			return false;
+		}
+
+		self::strip_excluded_nodes( $dom );
+
+		$body = $dom->getElementsByTagName( 'body' )->item( 0 );
+		if ( ! $body ) {
+			return false;
+		}
+
+		$title = get_the_title( $post_id );
+		$title = html_entity_decode( wp_strip_all_tags( $title ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+
+		self::strip_leading_title_duplicate_h1( $body, $title );
+
+		$markdown  = '# ' . self::escape_md_heading_text( $title ) . "\n\n";
+		$markdown .= self::convert_children( $body, 1 );
+
+		$markdown = preg_replace( "/\n{3,}/", "\n\n", $markdown );
+		$markdown = trim( $markdown ) . "\n";
+
+		/**
+		 * Filter final Markdown output.
+		 *
+		 * @param string $markdown Markdown text.
+		 * @param int    $post_id  Post ID.
+		 */
+		return apply_filters( 'singular_markdown_output', $markdown, $post_id );
+	}
+
+	/**
+	 * Fetch public HTML for the post permalink.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return string|false
+	 */
+	private static function fetch_rendered_html( $post_id ) {
+		$url = get_permalink( $post_id );
+		if ( ! $url ) {
+			return false;
+		}
+
+		$opts    = Singular_Markdown_Settings::get_options();
+		$timeout = isset( $opts['fetch_timeout'] ) ? (int) $opts['fetch_timeout'] : 30;
+		$timeout = max( 5, min( 120, $timeout ) );
+		/**
+		 * Timeout in seconds for the HTTP request that fetches rendered HTML.
+		 *
+		 * @param int $timeout Seconds.
+		 * @param int $post_id Post ID.
+		 */
+		$timeout = (int) apply_filters( 'singular_markdown_fetch_timeout', $timeout, $post_id );
+
+		$response = wp_remote_get(
+			$url,
+			array(
+				'timeout'     => $timeout,
+				'redirection' => 5,
+				'headers'     => array(
+					'Accept' => 'text/html,application/xhtml+xml',
+				),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return false;
+		}
+
+		$code = (int) wp_remote_retrieve_response_code( $response );
+		if ( $code < 200 || $code >= 400 ) {
+			return false;
+		}
+
+		$body = wp_remote_retrieve_body( $response );
+		return is_string( $body ) ? $body : false;
+	}
+
+	/**
+	 * Fallback: rendered post_content only (no full theme shell).
+	 *
+	 * @param int $post_id Post ID.
+	 * @return string HTML fragment.
+	 */
+	private static function fallback_content_html( $post_id ) {
+		$post = get_post( $post_id );
+		if ( ! $post ) {
+			return '';
+		}
+		setup_postdata( $post );
+		$html = apply_filters( 'the_content', $post->post_content );
+		wp_reset_postdata();
+		return '<div class="main-wrap singular-markdown-fallback">' . $html . '</div>';
+	}
+
+	/**
+	 * Extract inner HTML of main content wrapper.
+	 *
+	 * @param string $full_html Full document HTML.
+	 * @return string HTML fragment (with body wrapper for DOM).
+	 */
+	private static function extract_main_fragment_html( $full_html ) {
+		$dom = self::html_to_dom( $full_html );
+		if ( ! $dom ) {
+			return '';
+		}
+
+		$xpath = new DOMXPath( $dom );
+
+		foreach ( self::get_main_content_selector_candidates() as $sel ) {
+			$sel = trim( (string) $sel );
+			if ( '' === $sel ) {
+				continue;
+			}
+			$expr = self::selector_to_xpath( $sel );
+			if ( '' === $expr ) {
+				continue;
+			}
+			$nodes = @$xpath->query( $expr ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			if ( $nodes && $nodes->length > 0 ) {
+				$wrapper = $nodes->item( 0 );
+				if ( $wrapper instanceof DOMElement ) {
+					$html = self::inner_html( $wrapper );
+					if ( '' !== trim( wp_strip_all_tags( $html ) ) ) {
+						return $html;
+					}
+				}
+			}
+		}
+
+		$body = $dom->getElementsByTagName( 'body' )->item( 0 );
+		return $body ? self::inner_html( $body ) : '';
+	}
+
+	/**
+	 * Parse HTML into DOMDocument with UTF-8 handling.
+	 *
+	 * @param string $html HTML string.
+	 * @return DOMDocument|null
+	 */
+	private static function html_to_dom( $html ) {
+		if ( '' === $html ) {
+			return null;
+		}
+		libxml_use_internal_errors( true );
+		$dom = new DOMDocument();
+		$wrapped = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>' . $html . '</body></html>';
+		$dom->loadHTML( $wrapped, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD );
+		libxml_clear_errors();
+		return $dom;
+	}
+
+	/**
+	 * Remove nodes matching excluded selectors.
+	 *
+	 * @param DOMDocument $dom Document whose body will be cleaned.
+	 */
+	private static function strip_excluded_nodes( DOMDocument $dom ) {
+		$xpath = new DOMXPath( $dom );
+		$remove = array();
+
+		foreach ( self::default_excluded_selectors() as $sel ) {
+			$sel = trim( (string) $sel );
+			if ( '' === $sel ) {
+				continue;
+			}
+			$expr = self::selector_to_xpath( $sel );
+			if ( '' === $expr ) {
+				continue;
+			}
+			$nodes = @$xpath->query( $expr ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			if ( ! $nodes ) {
+				continue;
+			}
+			foreach ( $nodes as $n ) {
+				$remove[] = $n;
+			}
+		}
+
+		foreach ( $remove as $node ) {
+			if ( $node && $node->parentNode ) {
+				$node->parentNode->removeChild( $node );
+			}
+		}
+	}
+
+	/**
+	 * Map a simple selector to XPath (tags, #id, .class only).
+	 *
+	 * @param string $sel Selector.
+	 * @return string XPath or empty.
+	 */
+	private static function selector_to_xpath( $sel ) {
+		if ( preg_match( '/^[a-zA-Z][a-zA-Z0-9_-]*$/', $sel ) ) {
+			return '//' . strtolower( $sel );
+		}
+		if ( 0 === strpos( $sel, '#' ) ) {
+			$id = substr( $sel, 1 );
+			$id = preg_replace( '/[^a-zA-Z0-9_-]/', '', $id );
+			return $id ? "//*[@id='" . $id . "']" : '';
+		}
+		if ( 0 === strpos( $sel, '.' ) ) {
+			$class = substr( $sel, 1 );
+			$class = preg_replace( '/[^a-zA-Z0-9_-]/', '', $class );
+			return $class ? "//*[contains(concat(' ', normalize-space(@class), ' '), ' " . $class . " ')]" : '';
+		}
+		return '';
+	}
+
+	/**
+	 * Remove first h1 if it matches the document title (avoid duplicate top heading).
+	 *
+	 * @param DOMElement $root  Body element.
+	 * @param string     $title Post title plain text.
+	 */
+	private static function strip_leading_title_duplicate_h1( DOMElement $root, $title ) {
+		$xpath = new DOMXPath( $root->ownerDocument );
+		$h1s   = $xpath->query( './/h1', $root );
+		if ( ! $h1s || $h1s->length === 0 ) {
+			return;
+		}
+		$first = $h1s->item( 0 );
+		$text  = self::element_text_content( $first );
+		if ( '' === $text ) {
+			return;
+		}
+		$a = mb_strtolower( preg_replace( '/\s+/u', ' ', trim( $title ) ) );
+		$b = mb_strtolower( preg_replace( '/\s+/u', ' ', trim( $text ) ) );
+		if ( $a === $b && $first->parentNode ) {
+			$first->parentNode->removeChild( $first );
+		}
+	}
+
+	/**
+	 * Convert block children of a node to Markdown with heading level offset.
+	 *
+	 * @param DOMElement $el           Element.
+	 * @param int        $heading_bump Add to HTML heading level (1 = default after title #).
+	 * @return string
+	 */
+	private static function convert_children( DOMElement $el, $heading_bump = 1 ) {
+		$out = '';
+		foreach ( iterator_to_array( $el->childNodes ) as $child ) {
+			$out .= self::convert_node( $child, $heading_bump );
+		}
+		return $out;
+	}
+
+	/**
+	 * Convert a single node.
+	 *
+	 * @param DOMNode $node         Node.
+	 * @param int     $heading_bump Heading bump.
+	 * @return string
+	 */
+	private static function convert_node( DOMNode $node, $heading_bump = 1 ) {
+		if ( XML_TEXT_NODE === $node->nodeType ) {
+			return self::escape_md_inline( $node->nodeValue );
+		}
+		if ( XML_COMMENT_NODE === $node->nodeType ) {
+			return '';
+		}
+		if ( ! ( $node instanceof DOMElement ) ) {
+			return '';
+		}
+
+		$tag = strtolower( $node->nodeName );
+
+		switch ( $tag ) {
+			case 'h1':
+			case 'h2':
+			case 'h3':
+			case 'h4':
+			case 'h5':
+			case 'h6':
+				$lvl = (int) substr( $tag, 1 ) + (int) $heading_bump;
+				$lvl = max( 1, min( 6, $lvl ) );
+				$hashes = str_repeat( '#', $lvl );
+				$text   = trim( self::convert_inline_children( $node ) );
+				if ( '' === $text ) {
+					return '';
+				}
+				return $hashes . ' ' . $text . "\n\n";
+
+			case 'p':
+				$t = trim( self::convert_inline_children( $node ) );
+				return '' === $t ? '' : $t . "\n\n";
+
+			case 'br':
+				return "\n";
+
+			case 'blockquote':
+				$inner = trim( self::convert_children( $node, $heading_bump ) );
+				if ( '' === $inner ) {
+					return '';
+				}
+				$lines = preg_split( '/\R/u', $inner );
+				$pref  = '';
+				foreach ( (array) $lines as $line ) {
+					$pref .= '> ' . rtrim( (string) $line, "\n" ) . "\n";
+				}
+				return rtrim( $pref, "\n" ) . "\n\n";
+
+			case 'ul':
+				$buf = '';
+				foreach ( iterator_to_array( $node->childNodes ) as $li ) {
+					if ( ! ( $li instanceof DOMElement ) || 'li' !== strtolower( $li->nodeName ) ) {
+						continue;
+					}
+					$item = trim( self::convert_list_item_content( $li, $heading_bump ) );
+					if ( '' !== $item ) {
+						$buf .= '- ' . $item . "\n";
+					}
+				}
+				return '' === $buf ? '' : $buf . "\n";
+
+			case 'ol':
+				$idx = 1;
+				$buf = '';
+				foreach ( iterator_to_array( $node->childNodes ) as $li ) {
+					if ( ! ( $li instanceof DOMElement ) || 'li' !== strtolower( $li->nodeName ) ) {
+						continue;
+					}
+					$item = trim( self::convert_list_item_content( $li, $heading_bump ) );
+					if ( '' !== $item ) {
+						$buf .= $idx . '. ' . $item . "\n";
+						++$idx;
+					}
+				}
+				return '' === $buf ? '' : $buf . "\n";
+
+			case 'table':
+				return self::convert_table( $node, $heading_bump );
+
+			case 'hr':
+				return "---\n\n";
+
+			case 'div':
+			case 'section':
+			case 'article':
+			case 'main':
+			case 'figure':
+				return self::convert_children( $node, $heading_bump );
+
+			case 'img':
+				$src = $node->getAttribute( 'src' );
+				$alt = $node->getAttribute( 'alt' );
+				if ( '' === $src ) {
+					return '';
+				}
+				return '![' . self::escape_md_alt( $alt ) . '](' . self::escape_md_url( $src ) . ")\n\n";
+
+			default:
+				return self::convert_inline_children( $node );
+		}
+	}
+
+	/**
+	 * List item: flatten block children with line breaks.
+	 *
+	 * @param DOMElement $li           Li element.
+	 * @param int        $heading_bump Heading bump.
+	 * @return string
+	 */
+	private static function convert_list_item_content( DOMElement $li, $heading_bump ) {
+		$parts = array();
+		foreach ( iterator_to_array( $li->childNodes ) as $c ) {
+			if ( XML_TEXT_NODE === $c->nodeType ) {
+				$t = trim( $c->nodeValue );
+				if ( '' !== $t ) {
+					$parts[] = self::escape_md_inline( $t );
+				}
+				continue;
+			}
+			if ( $c instanceof DOMElement ) {
+				$tag = strtolower( $c->nodeName );
+				if ( in_array( $tag, array( 'ul', 'ol', 'table', 'blockquote' ), true ) ) {
+					$parts[] = trim( self::convert_node( $c, $heading_bump ) );
+				} elseif ( in_array( $tag, array( 'p', 'div' ), true ) ) {
+					$parts[] = trim( self::convert_inline_children( $c ) );
+				} else {
+					$parts[] = trim( self::convert_node( $c, $heading_bump ) );
+				}
+			}
+		}
+		return trim( preg_replace( '/\s+/u', ' ', implode( ' ', array_filter( $parts ) ) ) );
+	}
+
+	/**
+	 * Simple GFM-style table conversion.
+	 *
+	 * @param DOMElement $table        Table node.
+	 * @param int        $heading_bump Unused depth for cells.
+	 * @return string
+	 */
+	private static function convert_table( DOMElement $table, $heading_bump ) {
+		$rows = array();
+		foreach ( $table->getElementsByTagName( 'tr' ) as $tr ) {
+			if ( ! self::is_descendant_of_table( $table, $tr ) ) {
+				continue;
+			}
+			$cells = array();
+			foreach ( $tr->childNodes as $cell ) {
+				if ( ! ( $cell instanceof DOMElement ) ) {
+					continue;
+				}
+				$cn = strtolower( $cell->nodeName );
+				if ( ! in_array( $cn, array( 'th', 'td' ), true ) ) {
+					continue;
+				}
+				$cells[] = trim( preg_replace( '/\s+/u', ' ', self::convert_inline_children( $cell ) ) );
+			}
+			if ( ! empty( $cells ) ) {
+				$rows[] = $cells;
+			}
+		}
+		if ( empty( $rows ) ) {
+			return '';
+		}
+		$width = max( array_map( 'count', $rows ) );
+		foreach ( $rows as &$r ) {
+			while ( count( $r ) < $width ) {
+				$r[] = '';
+			}
+		}
+		unset( $r );
+
+		$lines   = array();
+		$lines[] = '| ' . implode( ' | ', $rows[0] ) . ' |';
+		$lines[] = '| ' . implode( ' | ', array_fill( 0, $width, '---' ) ) . ' |';
+		for ( $i = 1, $c = count( $rows ); $i < $c; $i++ ) {
+			$lines[] = '| ' . implode( ' | ', $rows[ $i ] ) . ' |';
+		}
+		return implode( "\n", $lines ) . "\n\n";
+	}
+
+	/**
+	 * Check tr belongs to this table (not nested).
+	 *
+	 * @param DOMElement $table Table.
+	 * @param DOMElement $tr    Row.
+	 * @return bool
+	 */
+	private static function is_descendant_of_table( DOMElement $table, DOMElement $tr ) {
+		$p = $tr->parentNode;
+		while ( $p ) {
+			if ( $p === $table ) {
+				return true;
+			}
+			if ( $p instanceof DOMElement && 'table' === strtolower( $p->nodeName ) ) {
+				return false;
+			}
+			$p = $p->parentNode;
+		}
+		return false;
+	}
+
+	/**
+	 * Phrasing content: recurse for inline/bold/link.
+	 *
+	 * @param DOMElement $el Element.
+	 * @return string
+	 */
+	private static function convert_inline_children( DOMElement $el ) {
+		$out = '';
+		foreach ( iterator_to_array( $el->childNodes ) as $child ) {
+			if ( XML_TEXT_NODE === $child->nodeType ) {
+				$out .= self::escape_md_inline( $child->nodeValue );
+				continue;
+			}
+			if ( ! ( $child instanceof DOMElement ) ) {
+				continue;
+			}
+			$tag = strtolower( $child->nodeName );
+			switch ( $tag ) {
+				case 'strong':
+				case 'b':
+					$inner = trim( self::convert_inline_children( $child ) );
+					$out  .= '' !== $inner ? '**' . $inner . '**' : '';
+					break;
+				case 'em':
+				case 'i':
+					$inner = trim( self::convert_inline_children( $child ) );
+					$out  .= '' !== $inner ? '*' . $inner . '*' : '';
+					break;
+				case 'code':
+					$inner = trim( self::convert_inline_children( $child ) );
+					$out  .= '`' . str_replace( '`', '\`', $inner ) . '`';
+					break;
+				case 'a':
+					$href = $child->getAttribute( 'href' );
+					$txt  = trim( self::convert_inline_children( $child ) );
+					if ( '' === $href ) {
+						$out .= $txt;
+						break;
+					}
+					$out .= '[' . self::escape_md_link_text( $txt ) . '](' . self::escape_md_url( $href ) . ')';
+					break;
+				case 'br':
+					$out .= "\n";
+					break;
+				default:
+					$out .= self::convert_inline_children( $child );
+					break;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Inner HTML of an element.
+	 *
+	 * @param DOMElement $el Element.
+	 * @return string
+	 */
+	private static function inner_html( DOMElement $el ) {
+		$html = '';
+		foreach ( iterator_to_array( $el->childNodes ) as $child ) {
+			$html .= $el->ownerDocument->saveHTML( $child );
+		}
+		return $html;
+	}
+
+	/**
+	 * Plain text of element.
+	 *
+	 * @param DOMElement $el Element.
+	 * @return string
+	 */
+	private static function element_text_content( DOMElement $el ) {
+		return trim( html_entity_decode( $el->textContent, ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
+	}
+
+	/**
+	 * Escape inline markdown special chars lightly.
+	 *
+	 * @param string $text Text.
+	 * @return string
+	 */
+	private static function escape_md_inline( $text ) {
+		$text = html_entity_decode( (string) $text, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+		return str_replace( array( "\r\n", "\r" ), "\n", $text );
+	}
+
+	/**
+	 * Heading text escape.
+	 *
+	 * @param string $text Text.
+	 * @return string
+	 */
+	private static function escape_md_heading_text( $text ) {
+		return trim( str_replace( array( "\n", "\r" ), ' ', self::escape_md_inline( $text ) ) );
+	}
+
+	/**
+	 * Link label escape.
+	 *
+	 * @param string $text Text.
+	 * @return string
+	 */
+	private static function escape_md_link_text( $text ) {
+		$t = str_replace( array( '\\', '[', ']' ), array( '\\\\', '\\[', '\\]' ), $text );
+		return $t;
+	}
+
+	/**
+	 * URL for markdown.
+	 *
+	 * @param string $url URL.
+	 * @return string
+	 */
+	private static function escape_md_url( $url ) {
+		return str_replace( array( ' ', '(' ), array( '%20', '%28' ), esc_url_raw( $url ) );
+	}
+
+	/**
+	 * Alt text.
+	 *
+	 * @param string $alt Alt.
+	 * @return string
+	 */
+	private static function escape_md_alt( $alt ) {
+		return str_replace( array( ']', '[' ), array( '', '' ), self::escape_md_inline( $alt ) );
+	}
+}
