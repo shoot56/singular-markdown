@@ -5,7 +5,7 @@ WordPress plugin (theme-agnostic) that:
 - Caches a Markdown representation of each **eligible** singular URL under `wp-content/uploads/singular-markdown-cache/`.
 - Serves it at the same path as the HTML permalink with `.md` appended (rewrite rules), for example `/about/` → `/about.md`.
 - Adds `Link: </path.md>; rel="alternate"; type="text/markdown"` on HTML singular responses.
-- Regenerates on save, trash, delete, and supports background full regeneration from **Settings → Singular Markdown**.
+- Queues regeneration on save, trash, delete, and supports background full regeneration from **Settings → Singular Markdown**.
 
 After install or update, open **Settings → Permalinks** and click **Save** once if `.md` URLs return 404 (rewrite flush).
 
@@ -15,6 +15,8 @@ After install or update, open **Settings → Permalinks** and click **Save** onc
 2. **Pick main fragment** — first matching selector from **Main content selectors** (plus built-in fallbacks), or fall back to filtered `post_content`.
 3. **Strip noise** — remove nodes matching the built-in list plus **Extra strip selectors**, then apply the `singular_markdown_excluded_selectors` filter.
 4. **Convert** — page title as `#` heading, duplicate leading `h1` removed when it matches the title, block HTML → Markdown, then the `singular_markdown_output` filter.
+
+Automatic conversion runs in scheduled background jobs. Public `.md` requests do **not** run HTML fetching or conversion synchronously: if no cache exists yet, the request queues generation and returns `503 Retry-After`; if stale cache exists, stale Markdown is served while regeneration is queued.
 
 ## Per-post custom Markdown
 
@@ -63,6 +65,8 @@ Developers can override the final decision with filters (see below).
 - `singular_markdown_is_post_eligible` — `(bool $eligible, int $post_id)` after built-in rules; return `false` to exclude or `true` to include.
 - `singular_markdown_eligibility` — `(array $result, int $post_id)` with keys `eligible`, `code`, `message`; adjust or replace the full diagnostic result.
 - `singular_markdown_fetch_timeout` — `(int $timeout, int $post_id)` seconds for the HTML fetch request.
+- `singular_markdown_cache_control` — `(string $header, int $post_id)` Cache-Control header for successful `.md` responses.
+- `singular_markdown_cache_eligibility` — `(bool $cache, int $post_id)` whether to cache eligibility decisions for five minutes.
 
 ## Internal query vars
 
@@ -70,7 +74,7 @@ Rewrite uses short internal vars `sing_md` and `sing_md_path` (not part of the p
 
 ## Manual verification
 
-1. Publish a normal page: HTML has `Link` header to `.md`; `/path.md` returns Markdown.
+1. Publish a normal page: HTML has `Link` header to `.md`; `/path.md` returns cached Markdown after background generation (a first uncached request may return `503 Retry-After`).
 2. Unpublish or trash: `.md` returns 404; cache file removed after save/cron.
 3. Add post ID to **Exclude post IDs**: `.md` and `Link` disappear; cache purged on save/regenerate.
 4. Mark post **noindex** in Yoast (or another supported SEO plugin): excluded unless force-included.

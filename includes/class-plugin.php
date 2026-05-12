@@ -56,6 +56,7 @@ class Singular_Markdown_Plugin {
 		add_action( 'wp_trash_post', array( $this, 'on_trash_post' ), 10, 1 );
 
 		add_action( Singular_Markdown_Settings::CRON_HOOK_BATCH, array( __CLASS__, 'run_batch_regeneration' ) );
+		add_action( Singular_Markdown_Generator::CRON_HOOK_GENERATE, array( 'Singular_Markdown_Generator', 'run_scheduled_regeneration' ), 10, 1 );
 	}
 
 	/**
@@ -114,6 +115,8 @@ class Singular_Markdown_Plugin {
 			return;
 		}
 
+		Singular_Markdown_Post_Type_Registry::clear_post_eligibility_cache( $post_id );
+
 		if ( ! Singular_Markdown_Post_Type_Registry::is_post_eligible( $post_id ) ) {
 			Singular_Markdown_Storage::delete( $post_id );
 			return;
@@ -127,7 +130,7 @@ class Singular_Markdown_Plugin {
 			return;
 		}
 
-		Singular_Markdown_Generator::generate_and_cache( $post_id );
+		Singular_Markdown_Generator::schedule_regeneration( $post_id );
 	}
 
 	/**
@@ -139,6 +142,7 @@ class Singular_Markdown_Plugin {
 		if ( ! ( $post instanceof WP_Post ) ) {
 			return;
 		}
+		Singular_Markdown_Post_Type_Registry::clear_post_eligibility_cache( $post->ID );
 		if ( 'publish' === $new_status && Singular_Markdown_Post_Type_Registry::is_post_eligible( $post->ID ) ) {
 			// Markdown is refreshed in save_post (priority 20), after Singular_Markdown_Post_Options saves meta (priority 15).
 			return;

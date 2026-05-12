@@ -14,6 +14,15 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class Singular_Markdown_Post_Type_Registry {
 
+	const ELIGIBILITY_CACHE_PREFIX = 'singular_md_elig_';
+
+	/**
+	 * In-request eligibility cache.
+	 *
+	 * @var array<int,array{fingerprint:string,result:array}>
+	 */
+	private static $eligibility_request_cache = array();
+
 	/**
 	 * Post types excluded from defaults.
 	 *
@@ -132,7 +141,123 @@ class Singular_Markdown_Post_Type_Registry {
 	 * @return array{eligible:bool,code:string,message:string}
 	 */
 	public static function get_post_eligibility( $post_id ) {
-		return Singular_Markdown_Eligibility::evaluate( (int) $post_id );
+		$post_id = (int) $post_id;
+		if ( $post_id <= 0 ) {
+			return Singular_Markdown_Eligibility::evaluate( $post_id );
+		}
+
+		if ( ! apply_filters( 'singular_markdown_cache_eligibility', true, $post_id ) ) {
+			return Singular_Markdown_Eligibility::evaluate( $post_id );
+		}
+
+		$fingerprint = self::get_eligibility_fingerprint( $post_id );
+		$cache_key   = self::ELIGIBILITY_CACHE_PREFIX . $post_id;
+
+		if ( isset( self::$eligibility_request_cache[ $post_id ] ) && isset( self::$eligibility_request_cache[ $post_id ]['fingerprint'] ) && $fingerprint === self::$eligibility_request_cache[ $post_id ]['fingerprint'] ) {
+			return self::$eligibility_request_cache[ $post_id ]['result'];
+		}
+
+		$cached = get_transient( $cache_key );
+		if ( is_array( $cached ) && isset( $cached['fingerprint'], $cached['result'] ) && $fingerprint === $cached['fingerprint'] && is_array( $cached['result'] ) ) {
+			self::$eligibility_request_cache[ $post_id ] = $cached;
+			return $cached['result'];
+		}
+
+		$result = Singular_Markdown_Eligibility::evaluate( $post_id );
+		$entry  = array(
+			'fingerprint' => $fingerprint,
+			'result'      => $result,
+		);
+
+		self::$eligibility_request_cache[ $post_id ] = $entry;
+		set_transient( $cache_key, $entry, 5 * MINUTE_IN_SECONDS );
+
+		return $result;
+	}
+
+	/**
+	 * Clear cached eligibility for a post.
+	 *
+	 * @param int $post_id Post ID.
+	 */
+	public static function clear_post_eligibility_cache( $post_id ) {
+		$post_id = (int) $post_id;
+		unset( self::$eligibility_request_cache[ $post_id ] );
+		delete_transient( self::ELIGIBILITY_CACHE_PREFIX . $post_id );
+	}
+
+	/**
+	 * Fingerprint eligibility inputs that should invalidate cached decisions.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return string
+	 */
+	private static function get_eligibility_fingerprint( $post_id ) {
+		$post = get_post( $post_id );
+		$opts = Singular_Markdown_Settings::get_options();
+		unset( $opts['batch_offset'] );
+
+		$post_state = array();
+		if ( $post instanceof WP_Post ) {
+			$post_state = array(
+				'status'       => $post->post_status,
+				'type'         => $post->post_type,
+				'password'     => '' !== (string) $post->post_password,
+				'modified_gmt' => $post->post_modified_gmt,
+				'permalink'    => get_permalink( $post_id ),
+			);
+		}
+
+		$meta = array();
+		foreach ( self::eligibility_meta_keys() as $key ) {
+			$meta[ $key ] = get_post_meta( $post_id, $key, true );
+		}
+
+		$term_state = array();
+		$pairs      = isset( $opts['excluded_terms'] ) ? (array) $opts['excluded_terms'] : array();
+		foreach ( $pairs as $pair ) {
+			$pair = (string) $pair;
+			if ( false === strpos( $pair, ':' ) ) {
+				continue;
+			}
+			list( $tax, $tid ) = explode( ':', $pair, 2 );
+			$tax = sanitize_key( $tax );
+			$tid = (int) $tid;
+			if ( $tax && $tid > 0 ) {
+				$term_state[ $tax . ':' . $tid ] = has_term( $tid, $tax, $post_id ) ? 1 : 0;
+			}
+		}
+
+		return md5(
+			(string) wp_json_encode(
+				array(
+					'post'  => $post_state,
+					'opts'  => $opts,
+					'meta'  => $meta,
+					'terms' => $term_state,
+				)
+			)
+		);
+	}
+
+	/**
+	 * Post meta keys that can affect eligibility.
+	 *
+	 * @return string[]
+	 */
+	private static function eligibility_meta_keys() {
+		return array(
+			'_yoast_wpseo_meta-robots-noindex',
+			'_yoast_wpseo_meta-robots-adv',
+			'_yoast_wpseo_canonical',
+			'rank_math_robots',
+			'rank_math_canonical_url',
+			'_seopress_robots_index',
+			'_seopress_robots_canonical',
+			'_aioseo_noindex',
+			'_aioseo_meta_data',
+			'_aioseo_canonical_url',
+		);
 	}
 
 	/**

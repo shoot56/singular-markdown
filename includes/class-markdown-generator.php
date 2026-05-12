@@ -14,6 +14,12 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class Singular_Markdown_Generator {
 
+	const CRON_HOOK_GENERATE = 'singular_markdown_generate_post';
+
+	const LOCK_PREFIX = 'singular_md_generating_';
+
+	const LOCK_TTL = 300;
+
 	/**
 	 * Default CSS selectors / tag names to strip from main content.
 	 *
@@ -118,13 +124,107 @@ class Singular_Markdown_Generator {
 			return $md;
 		}
 
-		$md = self::generate_markdown( $post_id );
-		if ( false === $md || '' === $md ) {
+		if ( ! self::acquire_generation_lock( $post_id ) ) {
 			return false;
 		}
 
-		Singular_Markdown_Storage::write( $post_id, $md );
-		return $md;
+		try {
+			$md = self::generate_markdown( $post_id );
+			if ( false === $md || '' === $md ) {
+				return false;
+			}
+
+			Singular_Markdown_Storage::write( $post_id, $md );
+			return $md;
+		} finally {
+			self::release_generation_lock( $post_id );
+		}
+	}
+
+	/**
+	 * Schedule a controlled background regeneration for one post.
+	 *
+	 * @param int $post_id Post ID.
+	 * @param int $delay   Delay in seconds.
+	 * @return bool
+	 */
+	public static function schedule_regeneration( $post_id, $delay = 5 ) {
+		$post_id = (int) $post_id;
+		if ( $post_id <= 0 || ! Singular_Markdown_Post_Type_Registry::is_post_eligible( $post_id ) ) {
+			return false;
+		}
+		if ( Singular_Markdown_Post_Options::uses_custom_markdown( $post_id ) ) {
+			return false;
+		}
+
+		$args = array( $post_id );
+		if ( wp_next_scheduled( self::CRON_HOOK_GENERATE, $args ) ) {
+			return true;
+		}
+
+		return (bool) wp_schedule_single_event( time() + max( 1, (int) $delay ), self::CRON_HOOK_GENERATE, $args );
+	}
+
+	/**
+	 * Cron callback for one-post regeneration.
+	 *
+	 * @param int $post_id Post ID.
+	 */
+	public static function run_scheduled_regeneration( $post_id ) {
+		self::generate_and_cache( (int) $post_id );
+	}
+
+	/**
+	 * Whether this post currently has a generation lock.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return bool
+	 */
+	public static function is_generation_locked( $post_id ) {
+		$expires = (int) get_option( self::get_lock_key( $post_id ), 0 );
+		if ( $expires <= 0 ) {
+			return false;
+		}
+		if ( $expires < time() ) {
+			delete_option( self::get_lock_key( $post_id ) );
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * @param int $post_id Post ID.
+	 * @return bool True when lock acquired.
+	 */
+	private static function acquire_generation_lock( $post_id ) {
+		$key     = self::get_lock_key( $post_id );
+		$expires = time() + self::LOCK_TTL;
+		if ( add_option( $key, $expires, '', 'no' ) ) {
+			return true;
+		}
+
+		$current = (int) get_option( $key, 0 );
+		if ( $current >= time() ) {
+			return false;
+		}
+
+		delete_option( $key );
+		return add_option( $key, $expires, '', 'no' );
+	}
+
+	/**
+	 * @param int $post_id Post ID.
+	 */
+	private static function release_generation_lock( $post_id ) {
+		delete_option( self::get_lock_key( $post_id ) );
+	}
+
+	/**
+	 * @param int $post_id Post ID.
+	 * @return string Option key.
+	 */
+	private static function get_lock_key( $post_id ) {
+		return self::LOCK_PREFIX . (int) $post_id;
 	}
 
 	/**

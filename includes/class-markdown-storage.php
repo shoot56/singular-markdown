@@ -40,10 +40,13 @@ class Singular_Markdown_Storage {
 			return false;
 		}
 		if ( file_exists( $dir ) && is_dir( $dir ) ) {
+			self::write_index_html( $dir );
+			self::write_server_protection_files( $dir );
 			return true;
 		}
 		wp_mkdir_p( $dir );
 		self::write_index_html( $dir );
+		self::write_server_protection_files( $dir );
 		return file_exists( $dir ) && is_dir( $dir );
 	}
 
@@ -54,6 +57,25 @@ class Singular_Markdown_Storage {
 		$index = trailingslashit( $dir ) . 'index.html';
 		if ( ! file_exists( $index ) ) {
 			file_put_contents( $index, '' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_file_put_contents
+		}
+	}
+
+	/**
+	 * Add best-effort server config files so numeric cache files are not directly
+	 * served from uploads on Apache/IIS. WordPress still reads them from disk.
+	 *
+	 * @param string $dir Directory.
+	 */
+	private static function write_server_protection_files( $dir ) {
+		$htaccess = trailingslashit( $dir ) . '.htaccess';
+		if ( ! file_exists( $htaccess ) ) {
+			file_put_contents( $htaccess, "Require all denied\nDeny from all\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_file_put_contents
+		}
+
+		$web_config = trailingslashit( $dir ) . 'web.config';
+		if ( ! file_exists( $web_config ) ) {
+			$config = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration><system.webServer><authorization><deny users=\"*\" /></authorization></system.webServer></configuration>\n";
+			file_put_contents( $web_config, $config ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_file_put_contents
 		}
 	}
 
@@ -88,7 +110,7 @@ class Singular_Markdown_Storage {
 			return false;
 		}
 		$file = self::get_file_path( $post_id );
-		$tmp  = $file . '.tmp';
+		$tmp  = $file . '.' . str_replace( '.', '', uniqid( 'tmp-', true ) ) . '.tmp';
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_file_put_contents
 		if ( false === file_put_contents( $tmp, $markdown ) ) {
 			return false;
@@ -98,6 +120,21 @@ class Singular_Markdown_Storage {
 			return false;
 		}
 		return true;
+	}
+
+	/**
+	 * Modification time of the cache file.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return int|false Unix timestamp or false.
+	 */
+	public static function get_modified_time( $post_id ) {
+		$file = self::get_file_path( $post_id );
+		if ( ! is_readable( $file ) ) {
+			return false;
+		}
+		$mtime = filemtime( $file );
+		return false === $mtime ? false : (int) $mtime;
 	}
 
 	/**

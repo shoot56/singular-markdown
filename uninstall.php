@@ -11,6 +11,15 @@ if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 
 delete_option( 'singular_markdown_options' );
 delete_option( 'flolive_md_options' );
+wp_clear_scheduled_hook( 'singular_markdown_batch_regenerate' );
+wp_clear_scheduled_hook( 'singular_markdown_generate_post' );
+
+global $wpdb;
+if ( isset( $wpdb ) ) {
+	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", $wpdb->esc_like( 'singular_md_generating_' ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s", '_transient_' . $wpdb->esc_like( 'singular_md_elig_' ) . '%', '_transient_timeout_' . $wpdb->esc_like( 'singular_md_elig_' ) . '%' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+	$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->postmeta} WHERE meta_key IN ( %s, %s )", '_singular_markdown_mode', '_singular_markdown_custom' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+}
 
 $upload = wp_upload_dir();
 if ( empty( $upload['error'] ) ) {

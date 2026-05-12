@@ -149,32 +149,86 @@ class Singular_Markdown_Router {
 			status_header( 404 );
 			nocache_headers();
 			header( 'Content-Type: text/plain; charset=UTF-8' );
+			header( 'X-Content-Type-Options: nosniff' );
 			echo esc_html__( 'Markdown version not found.', 'singular-markdown' );
 			exit;
 		}
 
+		$mtime = false;
 		if ( Singular_Markdown_Post_Options::uses_custom_markdown( $post_id ) ) {
 			$md = Singular_Markdown_Post_Options::get_filtered_custom_markdown( $post_id );
+			$mtime = (int) get_post_modified_time( 'U', true, $post_id );
 		} else {
 			$md = Singular_Markdown_Storage::read( $post_id );
-			if ( false === $md || Singular_Markdown_Storage::is_stale( $post_id ) ) {
-				$md = Singular_Markdown_Generator::generate_and_cache( $post_id );
+			if ( false === $md ) {
+				Singular_Markdown_Generator::schedule_regeneration( $post_id );
+				self::serve_generation_pending();
 			}
+			if ( Singular_Markdown_Storage::is_stale( $post_id ) ) {
+				Singular_Markdown_Generator::schedule_regeneration( $post_id );
+			}
+			$mtime = Singular_Markdown_Storage::get_modified_time( $post_id );
 		}
 
 		if ( false === $md || '' === $md ) {
 			status_header( 404 );
 			nocache_headers();
 			header( 'Content-Type: text/plain; charset=UTF-8' );
+			header( 'X-Content-Type-Options: nosniff' );
 			echo esc_html__( 'Markdown could not be generated.', 'singular-markdown' );
 			exit;
 		}
 
-		status_header( 200 );
-		header( 'Content-Type: text/markdown; charset=UTF-8' );
+		self::send_markdown_headers( $post_id, $md, $mtime );
 		// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 		echo $md;
 		exit;
+	}
+
+	/**
+	 * Return a lightweight response while background generation is queued.
+	 */
+	private static function serve_generation_pending() {
+		status_header( 503 );
+		nocache_headers();
+		header( 'Retry-After: 60' );
+		header( 'Content-Type: text/plain; charset=UTF-8' );
+		header( 'X-Content-Type-Options: nosniff' );
+		echo esc_html__( 'Markdown is being generated. Please retry shortly.', 'singular-markdown' );
+		exit;
+	}
+
+	/**
+	 * Send cache-aware Markdown response headers and handle conditional requests.
+	 *
+	 * @param int          $post_id Post ID.
+	 * @param string       $md      Markdown output.
+	 * @param int|false    $mtime   Last modified timestamp.
+	 */
+	private static function send_markdown_headers( $post_id, $md, $mtime ) {
+		$post_id = (int) $post_id;
+		$mtime   = false === $mtime ? time() : (int) $mtime;
+		$etag    = '"' . md5( $post_id . '|' . $mtime . '|' . strlen( $md ) ) . '"';
+
+		$last_modified = gmdate( 'D, d M Y H:i:s', $mtime ) . ' GMT';
+		$cache_control = apply_filters( 'singular_markdown_cache_control', 'public, max-age=300, stale-while-revalidate=3600', $post_id );
+		$cache_control = str_replace( array( "\r", "\n" ), '', (string) $cache_control );
+
+		$if_none_match = isset( $_SERVER['HTTP_IF_NONE_MATCH'] ) ? trim( (string) wp_unslash( $_SERVER['HTTP_IF_NONE_MATCH'] ) ) : '';
+		$if_modified   = isset( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ? strtotime( (string) wp_unslash( $_SERVER['HTTP_IF_MODIFIED_SINCE'] ) ) : false;
+
+		header( 'Content-Type: text/markdown; charset=UTF-8' );
+		header( 'X-Content-Type-Options: nosniff' );
+		header( 'Cache-Control: ' . $cache_control );
+		header( 'ETag: ' . $etag );
+		header( 'Last-Modified: ' . $last_modified );
+
+		if ( $etag === $if_none_match || ( false !== $if_modified && $if_modified >= $mtime ) ) {
+			status_header( 304 );
+			exit;
+		}
+
+		status_header( 200 );
 	}
 
 	/**
