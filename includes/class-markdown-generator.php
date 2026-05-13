@@ -16,6 +16,8 @@ class Singular_Markdown_Generator {
 
 	const CRON_HOOK_GENERATE = 'singular_markdown_generate_post';
 
+	const CRON_HOOK_GENERATE_ARCHIVE = 'singular_markdown_generate_archive';
+
 	const LOCK_PREFIX = 'singular_md_generating_';
 
 	const LOCK_TTL = 300;
@@ -101,7 +103,7 @@ class Singular_Markdown_Generator {
 	/**
 	 * Build Markdown for a post and write to cache.
 	 *
-	 * @param int $post_id Post ID.
+	 * @param int|string $post_id Post ID or archive lock identifier.
 	 * @return string|false Markdown or false on failure.
 	 */
 	public static function generate_and_cache( $post_id ) {
@@ -175,6 +177,330 @@ class Singular_Markdown_Generator {
 	}
 
 	/**
+	 * Schedule background regeneration for an archive Markdown cache.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 * @param int    $delay     Delay in seconds.
+	 * @return bool
+	 */
+	public static function schedule_archive_regeneration( $slug_path, $delay = 5 ) {
+		$slug_path = self::normalize_archive_slug_path( $slug_path );
+		if ( '' === $slug_path || ! self::is_archive_path_supported( $slug_path ) ) {
+			return false;
+		}
+
+		$args = array( $slug_path );
+		if ( wp_next_scheduled( self::CRON_HOOK_GENERATE_ARCHIVE, $args ) ) {
+			return true;
+		}
+
+		return (bool) wp_schedule_single_event( time() + max( 1, (int) $delay ), self::CRON_HOOK_GENERATE_ARCHIVE, $args );
+	}
+
+	/**
+	 * Cron callback for archive regeneration.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 */
+	public static function run_scheduled_archive_regeneration( $slug_path ) {
+		self::generate_archive_and_cache( $slug_path );
+	}
+
+	/**
+	 * Build archive Markdown and write it to cache.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 * @return string|false
+	 */
+	public static function generate_archive_and_cache( $slug_path ) {
+		$slug_path = self::normalize_archive_slug_path( $slug_path );
+		if ( '' === $slug_path || ! self::is_archive_path_supported( $slug_path ) ) {
+			return false;
+		}
+
+		$lock_id = 'archive_' . Singular_Markdown_Storage::get_archive_key( $slug_path );
+		if ( ! self::acquire_generation_lock( $lock_id ) ) {
+			return false;
+		}
+
+		try {
+			$query = self::archive_query_for_path( $slug_path );
+			if ( ! $query || ! $query->have_posts() ) {
+				return false;
+			}
+
+			$markdown = self::generate_archive_markdown_from_query( $slug_path, $query );
+			if ( false === $markdown || '' === trim( $markdown ) ) {
+				return false;
+			}
+
+			Singular_Markdown_Storage::write_archive( $slug_path, $markdown );
+			return $markdown;
+		} finally {
+			self::release_generation_lock( $lock_id );
+		}
+	}
+
+	/**
+	 * Whether a path can be treated as an archive/home listing.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 * @return bool
+	 */
+	public static function is_archive_path_supported( $slug_path ) {
+		$query = self::archive_query_for_path( $slug_path );
+		if ( ! $query || $query->is_search() || $query->is_singular() || ! $query->have_posts() ) {
+			return false;
+		}
+		return (bool) ( $query->is_home() || $query->is_archive() );
+	}
+
+	/**
+	 * Resolve an archive URL path through WordPress rewrite rules.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 * @return WP_Query|null
+	 */
+	private static function archive_query_for_path( $slug_path ) {
+		global $wp_rewrite;
+
+		$slug_path = self::normalize_archive_slug_path( $slug_path );
+		if ( '' === $slug_path ) {
+			return null;
+		}
+
+		$posts_page_query = self::posts_page_archive_query_for_path( $slug_path );
+		if ( $posts_page_query ) {
+			return $posts_page_query;
+		}
+
+		$listing_page_query = self::listing_page_archive_query_for_path( $slug_path );
+		if ( $listing_page_query ) {
+			return $listing_page_query;
+		}
+
+		$rules = $wp_rewrite instanceof WP_Rewrite ? $wp_rewrite->wp_rewrite_rules() : array();
+		if ( empty( $rules ) || ! is_array( $rules ) ) {
+			return null;
+		}
+
+		foreach ( $rules as $match => $query ) {
+			if ( ! preg_match( '#^' . $match . '#', $slug_path, $matches ) ) {
+				continue;
+			}
+
+			$query = (string) $query;
+			for ( $i = 1, $count = count( $matches ); $i < $count; $i++ ) {
+				$query = str_replace( '$matches[' . $i . ']', $matches[ $i ], $query );
+			}
+			$query = preg_replace( '#^index\.php\??#', '', $query );
+
+			$vars = array();
+			parse_str( (string) $query, $vars );
+			$vars = array_filter(
+				$vars,
+				static function ( $value ) {
+					return '' !== $value;
+				}
+			);
+
+			if ( empty( $vars ) || isset( $vars['feed'] ) || isset( $vars['attachment'] ) ) {
+				continue;
+			}
+
+			$q = new WP_Query();
+			$q->query( $vars );
+			if ( $q->is_404() || $q->is_singular() || $q->is_search() ) {
+				continue;
+			}
+			if ( $q->is_home() || $q->is_archive() ) {
+				return $q;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Resolve the configured posts page as a home/archive listing.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 * @return WP_Query|null
+	 */
+	private static function posts_page_archive_query_for_path( $slug_path ) {
+		$page_id = (int) get_option( 'page_for_posts' );
+		if ( $page_id <= 0 ) {
+			return null;
+		}
+
+		$path = wp_parse_url( get_permalink( $page_id ), PHP_URL_PATH );
+		if ( ! is_string( $path ) || self::normalize_archive_slug_path( $path ) !== $slug_path ) {
+			return null;
+		}
+
+		$query = new WP_Query(
+			array(
+				'post_type'              => 'post',
+				'post_status'            => 'publish',
+				'posts_per_page'         => (int) get_option( 'posts_per_page', 10 ),
+				'no_found_rows'          => true,
+				'ignore_sticky_posts'    => false,
+				'update_post_meta_cache' => false,
+				'update_post_term_cache' => false,
+			)
+		);
+		$query->is_home = true;
+		return $query;
+	}
+
+	/**
+	 * Resolve user-configured listing pages as archive-like queries.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 * @return WP_Query|null
+	 */
+	private static function listing_page_archive_query_for_path( $slug_path ) {
+		$mapping = self::listing_page_mapping_for_path( $slug_path );
+		if ( empty( $mapping ) ) {
+			return null;
+		}
+
+		$query = new WP_Query(
+			array(
+				'post_type'              => $mapping['post_type'],
+				'post_status'            => 'publish',
+				'posts_per_page'         => (int) apply_filters( 'singular_markdown_listing_posts_per_page', get_option( 'posts_per_page', 10 ), $mapping ),
+				'no_found_rows'          => true,
+				'ignore_sticky_posts'    => false,
+				'update_post_meta_cache' => false,
+				'update_post_term_cache' => false,
+				'singular_md_listing_page_id'   => (int) $mapping['page_id'],
+				'singular_md_listing_post_type' => $mapping['post_type'],
+			)
+		);
+		$query->is_archive = true;
+		return $query;
+	}
+
+	/**
+	 * Find configured listing page mapping by URL path.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 * @return array{page_id:int,post_type:string}|null
+	 */
+	private static function listing_page_mapping_for_path( $slug_path ) {
+		$slug_path = self::normalize_archive_slug_path( $slug_path );
+		foreach ( Singular_Markdown_Settings::get_listing_pages() as $mapping ) {
+			$page_id = isset( $mapping['page_id'] ) ? (int) $mapping['page_id'] : 0;
+			if ( $page_id <= 0 ) {
+				continue;
+			}
+			$path = wp_parse_url( get_permalink( $page_id ), PHP_URL_PATH );
+			if ( is_string( $path ) && self::normalize_archive_slug_path( $path ) === $slug_path ) {
+				return $mapping;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * @param string   $slug_path Archive path without .md.
+	 * @param WP_Query $query     Archive query.
+	 * @return string|false
+	 */
+	private static function generate_archive_markdown_from_query( $slug_path, WP_Query $query ) {
+		$title = self::archive_title( $slug_path, $query );
+		if ( '' === $title ) {
+			return false;
+		}
+
+		$markdown = '# ' . self::escape_md_heading_text( $title ) . "\n\n";
+		foreach ( $query->posts as $post ) {
+			if ( ! ( $post instanceof WP_Post ) || ! Singular_Markdown_Post_Type_Registry::is_post_eligible( $post->ID ) ) {
+				continue;
+			}
+			$post_title = html_entity_decode( wp_strip_all_tags( get_the_title( $post ) ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+			$url        = get_permalink( $post );
+			if ( '' === trim( $post_title ) || ! $url ) {
+				continue;
+			}
+
+			$markdown .= '## [' . self::escape_md_link_text( $post_title ) . '](' . self::escape_md_url( $url ) . ")\n\n";
+			$excerpt = self::archive_post_excerpt( $post );
+			if ( '' !== $excerpt ) {
+				$markdown .= $excerpt . "\n\n";
+			}
+		}
+
+		$markdown = preg_replace( "/\n{3,}/", "\n\n", $markdown );
+		$markdown = trim( $markdown ) . "\n";
+
+		return apply_filters( 'singular_markdown_archive_output', $markdown, $slug_path, $query );
+	}
+
+	/**
+	 * @param string   $slug_path Archive path without .md.
+	 * @param WP_Query $query     Archive query.
+	 * @return string
+	 */
+	private static function archive_title( $slug_path, WP_Query $query ) {
+		$title = '';
+		if ( $query->is_home() ) {
+			$page_id = (int) get_option( 'page_for_posts' );
+			$title   = $page_id > 0 ? get_the_title( $page_id ) : get_bloginfo( 'name' );
+		} elseif ( (int) $query->get( 'singular_md_listing_page_id' ) > 0 ) {
+			$title = get_the_title( (int) $query->get( 'singular_md_listing_page_id' ) );
+		} elseif ( $query->is_category() || $query->is_tag() || $query->is_tax() ) {
+			$obj = $query->get_queried_object();
+			if ( $obj instanceof WP_Term ) {
+				$title = $obj->name;
+			}
+		} elseif ( $query->is_post_type_archive() ) {
+			$post_type = $query->get( 'post_type' );
+			$post_type = is_array( $post_type ) ? reset( $post_type ) : $post_type;
+			$obj       = $post_type ? get_post_type_object( $post_type ) : null;
+			$title     = $obj && isset( $obj->labels->name ) ? $obj->labels->name : '';
+		} elseif ( $query->is_author() ) {
+			$obj = $query->get_queried_object();
+			if ( $obj instanceof WP_User ) {
+				$title = $obj->display_name;
+			}
+		} elseif ( $query->is_date() ) {
+			$title = trim( (string) $slug_path, '/' );
+		}
+
+		$title = html_entity_decode( wp_strip_all_tags( (string) $title ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+		return (string) apply_filters( 'singular_markdown_archive_title', $title, $slug_path, $query );
+	}
+
+	/**
+	 * @param WP_Post $post Post.
+	 * @return string
+	 */
+	private static function archive_post_excerpt( WP_Post $post ) {
+		$excerpt = has_excerpt( $post ) ? $post->post_excerpt : '';
+		if ( '' === trim( $excerpt ) ) {
+			$excerpt = wp_trim_words( wp_strip_all_tags( strip_shortcodes( $post->post_content ) ), 55 );
+		}
+		return trim( html_entity_decode( wp_strip_all_tags( $excerpt ), ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
+	}
+
+	/**
+	 * @param string $slug_path Path.
+	 * @return string
+	 */
+	private static function normalize_archive_slug_path( $slug_path ) {
+		$slug_path = trim( (string) $slug_path, '/' );
+		$base      = wp_parse_url( home_url( '/' ), PHP_URL_PATH );
+		$base      = is_string( $base ) ? trim( $base, '/' ) : '';
+		if ( '' !== $base && 0 === strpos( $slug_path, $base . '/' ) ) {
+			$slug_path = substr( $slug_path, strlen( $base ) + 1 );
+		}
+		return trim( $slug_path, '/' );
+	}
+
+	/**
 	 * Whether this post currently has a generation lock.
 	 *
 	 * @param int $post_id Post ID.
@@ -224,7 +550,8 @@ class Singular_Markdown_Generator {
 	 * @return string Option key.
 	 */
 	private static function get_lock_key( $post_id ) {
-		return self::LOCK_PREFIX . (int) $post_id;
+		$post_id = preg_replace( '/[^a-zA-Z0-9_-]/', '', (string) $post_id );
+		return self::LOCK_PREFIX . $post_id;
 	}
 
 	/**

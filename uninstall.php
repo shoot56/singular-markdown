@@ -13,6 +13,7 @@ delete_option( 'singular_markdown_options' );
 delete_option( 'flolive_md_options' );
 wp_clear_scheduled_hook( 'singular_markdown_batch_regenerate' );
 wp_clear_scheduled_hook( 'singular_markdown_generate_post' );
+wp_clear_scheduled_hook( 'singular_markdown_generate_archive' );
 
 global $wpdb;
 if ( isset( $wpdb ) ) {

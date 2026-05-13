@@ -24,6 +24,7 @@ class Singular_Markdown_Router {
 		add_filter( 'query_vars', array( __CLASS__, 'register_query_vars' ) );
 		add_action( 'template_redirect', array( __CLASS__, 'maybe_serve_markdown' ), 0 );
 		add_action( 'send_headers', array( __CLASS__, 'maybe_send_alternate_link' ) );
+		add_action( 'wp_head', array( __CLASS__, 'maybe_print_alternate_link_tag' ), 2 );
 	}
 
 	/**
@@ -135,6 +136,27 @@ class Singular_Markdown_Router {
 	}
 
 	/**
+	 * Relative Markdown path for an archive/home page.
+	 *
+	 * @return string
+	 */
+	private static function get_current_archive_md_url() {
+		if ( empty( $_SERVER['REQUEST_URI'] ) ) {
+			return '';
+		}
+		$path = wp_parse_url( esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ) ), PHP_URL_PATH );
+		if ( ! is_string( $path ) || '' === $path ) {
+			return '';
+		}
+		if ( '/' === $path ) {
+			$path = '/index.md';
+		} else {
+			$path = untrailingslashit( $path ) . '.md';
+		}
+		return $path;
+	}
+
+	/**
 	 * Serve Markdown response when rewrite matched.
 	 */
 	public static function maybe_serve_markdown() {
@@ -145,7 +167,19 @@ class Singular_Markdown_Router {
 		$slug_path = (string) get_query_var( self::QUERY_SLUGS );
 		$post_id   = self::resolve_path_to_post_id( $slug_path );
 
-		if ( ! $post_id || ! Singular_Markdown_Post_Type_Registry::is_post_eligible( $post_id ) ) {
+		if ( $post_id > 0 && $post_id === (int) get_option( 'page_for_posts' ) ) {
+			self::maybe_serve_archive_markdown( $slug_path );
+		}
+
+		if ( $post_id > 0 && self::is_configured_listing_page( $post_id ) ) {
+			self::maybe_serve_archive_markdown( $slug_path );
+		}
+
+		if ( ! $post_id ) {
+			self::maybe_serve_archive_markdown( $slug_path );
+		}
+
+		if ( ! Singular_Markdown_Post_Type_Registry::is_post_eligible( $post_id ) ) {
 			status_header( 404 );
 			nocache_headers();
 			header( 'Content-Type: text/plain; charset=UTF-8' );
@@ -180,6 +214,46 @@ class Singular_Markdown_Router {
 		}
 
 		self::send_markdown_headers( $post_id, $md, $mtime );
+		// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+		echo $md;
+		exit;
+	}
+
+	/**
+	 * Serve cached Markdown for archive-like paths.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 */
+	private static function maybe_serve_archive_markdown( $slug_path ) {
+		$slug_path = trim( (string) $slug_path, '/' );
+		if ( '' === $slug_path || ! Singular_Markdown_Generator::is_archive_path_supported( $slug_path ) ) {
+			status_header( 404 );
+			nocache_headers();
+			header( 'Content-Type: text/plain; charset=UTF-8' );
+			header( 'X-Content-Type-Options: nosniff' );
+			echo esc_html__( 'Markdown version not found.', 'singular-markdown' );
+			exit;
+		}
+
+		$md = Singular_Markdown_Storage::read_archive( $slug_path );
+		if ( false === $md ) {
+			Singular_Markdown_Generator::schedule_archive_regeneration( $slug_path );
+			self::serve_generation_pending();
+		}
+		if ( Singular_Markdown_Storage::is_archive_stale( $slug_path ) ) {
+			Singular_Markdown_Generator::schedule_archive_regeneration( $slug_path );
+		}
+
+		if ( false === $md || '' === trim( (string) $md ) ) {
+			status_header( 404 );
+			nocache_headers();
+			header( 'Content-Type: text/plain; charset=UTF-8' );
+			header( 'X-Content-Type-Options: nosniff' );
+			echo esc_html__( 'Markdown could not be generated.', 'singular-markdown' );
+			exit;
+		}
+
+		self::send_markdown_headers( 0, $md, Singular_Markdown_Storage::get_archive_modified_time( $slug_path ) );
 		// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 		echo $md;
 		exit;
@@ -238,24 +312,91 @@ class Singular_Markdown_Router {
 		if ( is_admin() ) {
 			return;
 		}
-		if ( ! is_singular() ) {
+		if ( ! is_singular() && ! is_home() && ! is_archive() ) {
 			return;
 		}
 
-		$post = get_queried_object();
-		if ( ! ( $post instanceof WP_Post ) ) {
-			return;
-		}
-
-		if ( ! Singular_Markdown_Post_Type_Registry::is_post_eligible( $post->ID ) ) {
-			return;
-		}
-
-		$path = self::get_alternate_md_path( $post->ID );
+		$path = self::get_current_alternate_md_path();
 		if ( '' === $path ) {
 			return;
 		}
 
 		header( sprintf( 'Link: <%s>; rel="alternate"; type="text/markdown"', $path ), false );
+	}
+
+	/**
+	 * Print HTML alternate link tag in document head.
+	 */
+	public static function maybe_print_alternate_link_tag() {
+		if ( is_admin() || ( ! is_singular() && ! is_home() && ! is_archive() ) ) {
+			return;
+		}
+		$path = self::get_current_alternate_md_path();
+		if ( '' === $path ) {
+			return;
+		}
+		printf(
+			'<link rel="alternate" type="text/markdown" href="%s" />' . "\n",
+			esc_url( self::absolute_url_from_path( $path ) )
+		);
+	}
+
+	/**
+	 * Relative Markdown path for current singular/archive query.
+	 *
+	 * @return string
+	 */
+	private static function get_current_alternate_md_path() {
+		if ( is_singular() ) {
+			$post = get_queried_object();
+			if ( ! ( $post instanceof WP_Post ) || ! Singular_Markdown_Post_Type_Registry::is_post_eligible( $post->ID ) ) {
+				return '';
+			}
+			return self::get_alternate_md_path( $post->ID );
+		}
+
+		if ( is_home() || is_archive() ) {
+			return self::get_current_archive_md_url();
+		}
+
+		return '';
+	}
+
+	/**
+	 * Whether a singular page is configured to behave as an archive/listing.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return bool
+	 */
+	private static function is_configured_listing_page( $post_id ) {
+		$post_id = (int) $post_id;
+		if ( $post_id <= 0 ) {
+			return false;
+		}
+		foreach ( Singular_Markdown_Settings::get_listing_pages() as $mapping ) {
+			if ( isset( $mapping['page_id'] ) && (int) $mapping['page_id'] === $post_id ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Build an absolute URL from a site-relative path without duplicating subdirectory installs.
+	 *
+	 * @param string $path Site-relative path.
+	 * @return string
+	 */
+	private static function absolute_url_from_path( $path ) {
+		$path  = '/' . ltrim( (string) $path, '/' );
+		$parts = wp_parse_url( home_url( '/' ) );
+		if ( ! is_array( $parts ) || empty( $parts['scheme'] ) || empty( $parts['host'] ) ) {
+			return home_url( $path );
+		}
+		$url = $parts['scheme'] . '://' . $parts['host'];
+		if ( ! empty( $parts['port'] ) ) {
+			$url .= ':' . (int) $parts['port'];
+		}
+		return $url . $path;
 	}
 }

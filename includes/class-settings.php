@@ -37,6 +37,7 @@ class Singular_Markdown_Settings {
 			'main_content_selectors'    => '',
 			'extra_strip_selectors'     => '',
 			'fetch_timeout'             => 30,
+			'listing_pages'             => array(),
 			'batch_offset'              => 0,
 		);
 	}
@@ -166,6 +167,72 @@ class Singular_Markdown_Settings {
 	}
 
 	/**
+	 * Normalize listing page mappings from admin form rows.
+	 *
+	 * @param array $page_ids   Page IDs.
+	 * @param array $post_types Post type slugs.
+	 * @return array<int,array{page_id:int,post_type:string}>
+	 */
+	public static function parse_listing_pages( array $page_ids, array $post_types ) {
+		$out = array();
+		$max = max( count( $page_ids ), count( $post_types ) );
+
+		for ( $i = 0; $i < $max; $i++ ) {
+			$page_id   = isset( $page_ids[ $i ] ) ? (int) $page_ids[ $i ] : 0;
+			$post_type = isset( $post_types[ $i ] ) ? sanitize_key( (string) $post_types[ $i ] ) : '';
+			if ( $page_id <= 0 || '' === $post_type ) {
+				continue;
+			}
+
+			$page = get_post( $page_id );
+			if ( ! ( $page instanceof WP_Post ) || 'page' !== $page->post_type ) {
+				continue;
+			}
+			$obj = get_post_type_object( $post_type );
+			if ( ! $obj || empty( $obj->public ) ) {
+				continue;
+			}
+
+			$key = $page_id . ':' . $post_type;
+			$out[ $key ] = array(
+				'page_id'   => $page_id,
+				'post_type' => $post_type,
+			);
+		}
+
+		return array_values( $out );
+	}
+
+	/**
+	 * Configured listing page mappings.
+	 *
+	 * @return array<int,array{page_id:int,post_type:string}>
+	 */
+	public static function get_listing_pages() {
+		$opts = self::get_options();
+		if ( empty( $opts['listing_pages'] ) || ! is_array( $opts['listing_pages'] ) ) {
+			return array();
+		}
+
+		$maps = array();
+		foreach ( $opts['listing_pages'] as $row ) {
+			if ( ! is_array( $row ) ) {
+				continue;
+			}
+			$page_id   = isset( $row['page_id'] ) ? (int) $row['page_id'] : 0;
+			$post_type = isset( $row['post_type'] ) ? sanitize_key( (string) $row['post_type'] ) : '';
+			if ( $page_id > 0 && '' !== $post_type ) {
+				$maps[] = array(
+					'page_id'   => $page_id,
+					'post_type' => $post_type,
+				);
+			}
+		}
+
+		return $maps;
+	}
+
+	/**
 	 * Handle form POST.
 	 */
 	public static function handle_post() {
@@ -247,6 +314,10 @@ class Singular_Markdown_Settings {
 			$fetch_timeout = isset( $_POST['singular_md_fetch_timeout'] ) ? (int) $_POST['singular_md_fetch_timeout'] : 30;
 			$fetch_timeout = max( 5, min( 120, $fetch_timeout ) );
 
+			$listing_page_ids   = isset( $_POST['singular_md_listing_page_ids'] ) ? (array) wp_unslash( $_POST['singular_md_listing_page_ids'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+			$listing_post_types = isset( $_POST['singular_md_listing_post_types'] ) ? (array) wp_unslash( $_POST['singular_md_listing_post_types'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+			$listing_pages      = self::parse_listing_pages( $listing_page_ids, $listing_post_types );
+
 			$opts                              = self::get_options();
 			$opts['excluded_post_types']       = $types;
 			$opts['excluded_post_ids']         = $ids;
@@ -255,10 +326,12 @@ class Singular_Markdown_Settings {
 			$opts['main_content_selectors']    = $selectors_raw;
 			$opts['extra_strip_selectors']     = $strip_raw;
 			$opts['fetch_timeout']             = $fetch_timeout;
+			$opts['listing_pages']             = $listing_pages;
 			update_option( self::OPTION_KEY, $opts, false );
 
 			Singular_Markdown_Storage::purge_ineligible();
 			self::schedule_full_regeneration();
+			self::schedule_listing_pages_regeneration();
 
 			add_settings_error( 'singular_markdown', 'saved', __( 'Settings saved. Ineligible cache files were removed and a full regeneration was scheduled.', 'singular-markdown' ), 'success' );
 		}
@@ -266,6 +339,7 @@ class Singular_Markdown_Settings {
 		if ( isset( $_POST['singular_md_regenerate'] ) ) {
 			Singular_Markdown_Storage::purge_ineligible();
 			self::schedule_full_regeneration();
+			self::schedule_listing_pages_regeneration();
 			add_settings_error( 'singular_markdown', 'regen', __( 'Ineligible cache files were removed and full regeneration was scheduled in the background.', 'singular-markdown' ), 'success' );
 		}
 	}
@@ -279,6 +353,22 @@ class Singular_Markdown_Settings {
 		$opts['batch_offset'] = 0;
 		update_option( self::OPTION_KEY, $opts, false );
 		wp_schedule_single_event( time() + 5, self::CRON_HOOK_BATCH );
+	}
+
+	/**
+	 * Schedule regeneration for all configured listing pages.
+	 */
+	public static function schedule_listing_pages_regeneration() {
+		foreach ( self::get_listing_pages() as $mapping ) {
+			$page_id = isset( $mapping['page_id'] ) ? (int) $mapping['page_id'] : 0;
+			if ( $page_id <= 0 ) {
+				continue;
+			}
+			$path = wp_parse_url( get_permalink( $page_id ), PHP_URL_PATH );
+			if ( is_string( $path ) && '' !== $path ) {
+				Singular_Markdown_Generator::schedule_archive_regeneration( $path );
+			}
+		}
 	}
 
 	/**
@@ -305,6 +395,20 @@ class Singular_Markdown_Settings {
 		$strip_val     = isset( $opts['extra_strip_selectors'] ) ? (string) $opts['extra_strip_selectors'] : '';
 		$fetch_timeout = isset( $opts['fetch_timeout'] ) ? (int) $opts['fetch_timeout'] : 30;
 		$fetch_timeout = max( 5, min( 120, $fetch_timeout ) );
+		$listing_pages = self::get_listing_pages();
+		$pages         = get_pages(
+			array(
+				'post_status' => array( 'publish', 'private', 'draft' ),
+				'sort_column' => 'post_title',
+			)
+		);
+		$post_type_choices = get_post_types(
+			array(
+				'public' => true,
+			),
+			'objects'
+		);
+		unset( $post_type_choices['attachment'] );
 
 		$counts_note = Singular_Markdown_Post_Type_Registry::count_published_approx();
 
@@ -365,6 +469,56 @@ class Singular_Markdown_Settings {
 				<h2><?php esc_html_e( 'Exclude by taxonomy term', 'singular-markdown' ); ?></h2>
 				<p class="description"><?php esc_html_e( 'One per line: taxonomy:term_id or taxonomy:term-slug (e.g. category:12 or post_tag:news). Lines starting with # are ignored.', 'singular-markdown' ); ?></p>
 				<p><textarea class="large-text code" name="singular_md_excluded_terms" rows="6" cols="60"><?php echo esc_textarea( $terms_lines ); ?></textarea></p>
+
+				<h2><?php esc_html_e( 'Listing pages', 'singular-markdown' ); ?></h2>
+				<p class="description"><?php esc_html_e( 'Use this for normal WordPress pages whose template displays posts. The selected page URL will generate archive-style Markdown from the selected post type instead of only the page body.', 'singular-markdown' ); ?></p>
+				<table class="widefat striped" style="max-width:900px;">
+					<thead>
+						<tr>
+							<th><?php esc_html_e( 'Page', 'singular-markdown' ); ?></th>
+							<th><?php esc_html_e( 'Post type to list', 'singular-markdown' ); ?></th>
+						</tr>
+					</thead>
+					<tbody>
+						<?php
+						$rows = $listing_pages;
+						for ( $i = count( $rows ); $i < 8; $i++ ) {
+							$rows[] = array(
+								'page_id'   => 0,
+								'post_type' => '',
+							);
+						}
+						?>
+						<?php foreach ( $rows as $row ) : ?>
+							<?php
+							$row_page_id = isset( $row['page_id'] ) ? (int) $row['page_id'] : 0;
+							$row_type    = isset( $row['post_type'] ) ? sanitize_key( (string) $row['post_type'] ) : '';
+							?>
+							<tr>
+								<td>
+									<select name="singular_md_listing_page_ids[]">
+										<option value="0"><?php esc_html_e( '— Select page —', 'singular-markdown' ); ?></option>
+										<?php foreach ( $pages as $page ) : ?>
+											<option value="<?php echo esc_attr( (string) $page->ID ); ?>" <?php selected( $row_page_id, (int) $page->ID ); ?>>
+												<?php echo esc_html( get_the_title( $page ) . ' (#' . $page->ID . ')' ); ?>
+											</option>
+										<?php endforeach; ?>
+									</select>
+								</td>
+								<td>
+									<select name="singular_md_listing_post_types[]">
+										<option value=""><?php esc_html_e( '— Select post type —', 'singular-markdown' ); ?></option>
+										<?php foreach ( $post_type_choices as $type_name => $type_obj ) : ?>
+											<option value="<?php echo esc_attr( $type_name ); ?>" <?php selected( $row_type, $type_name ); ?>>
+												<?php echo esc_html( $type_obj->labels->singular_name . ' (' . $type_name . ')' ); ?>
+											</option>
+										<?php endforeach; ?>
+									</select>
+								</td>
+							</tr>
+						<?php endforeach; ?>
+					</tbody>
+				</table>
 
 				<h2><?php esc_html_e( 'Markdown generation', 'singular-markdown' ); ?></h2>
 				<p class="description"><?php esc_html_e( 'These options affect how public HTML is turned into Markdown when a post is saved or when a .md URL is requested.', 'singular-markdown' ); ?></p>

@@ -57,6 +57,7 @@ class Singular_Markdown_Plugin {
 
 		add_action( Singular_Markdown_Settings::CRON_HOOK_BATCH, array( __CLASS__, 'run_batch_regeneration' ) );
 		add_action( Singular_Markdown_Generator::CRON_HOOK_GENERATE, array( 'Singular_Markdown_Generator', 'run_scheduled_regeneration' ), 10, 1 );
+		add_action( Singular_Markdown_Generator::CRON_HOOK_GENERATE_ARCHIVE, array( 'Singular_Markdown_Generator', 'run_scheduled_archive_regeneration' ), 10, 1 );
 	}
 
 	/**
@@ -116,9 +117,11 @@ class Singular_Markdown_Plugin {
 		}
 
 		Singular_Markdown_Post_Type_Registry::clear_post_eligibility_cache( $post_id );
+		$this->schedule_listing_page_if_configured( $post_id );
 
 		if ( ! Singular_Markdown_Post_Type_Registry::is_post_eligible( $post_id ) ) {
 			Singular_Markdown_Storage::delete( $post_id );
+			$this->schedule_listing_pages_for_post_type( $post->post_type );
 			return;
 		}
 
@@ -127,10 +130,12 @@ class Singular_Markdown_Plugin {
 			if ( false !== $md && '' !== trim( (string) $md ) ) {
 				Singular_Markdown_Storage::write( $post_id, $md );
 			}
+			$this->schedule_listing_pages_for_post_type( $post->post_type );
 			return;
 		}
 
 		Singular_Markdown_Generator::schedule_regeneration( $post_id );
+		$this->schedule_listing_pages_for_post_type( $post->post_type );
 	}
 
 	/**
@@ -149,6 +154,7 @@ class Singular_Markdown_Plugin {
 		}
 		if ( 'publish' === $old_status && 'publish' !== $new_status ) {
 			Singular_Markdown_Storage::delete( $post->ID );
+			$this->schedule_listing_pages_for_post_type( $post->post_type );
 		}
 	}
 
@@ -156,14 +162,64 @@ class Singular_Markdown_Plugin {
 	 * @param int $post_id Post ID.
 	 */
 	public function on_before_delete_post( $post_id ) {
+		$post = get_post( (int) $post_id );
 		Singular_Markdown_Storage::delete( (int) $post_id );
+		if ( $post instanceof WP_Post ) {
+			$this->schedule_listing_pages_for_post_type( $post->post_type );
+		}
 	}
 
 	/**
 	 * @param int $post_id Post ID.
 	 */
 	public function on_trash_post( $post_id ) {
+		$post = get_post( (int) $post_id );
 		Singular_Markdown_Storage::delete( (int) $post_id );
+		if ( $post instanceof WP_Post ) {
+			$this->schedule_listing_pages_for_post_type( $post->post_type );
+		}
+	}
+
+	/**
+	 * Refresh configured listing pages that include this post type.
+	 *
+	 * @param string $post_type Post type.
+	 */
+	private function schedule_listing_pages_for_post_type( $post_type ) {
+		$post_type = sanitize_key( (string) $post_type );
+		if ( '' === $post_type ) {
+			return;
+		}
+		foreach ( Singular_Markdown_Settings::get_listing_pages() as $mapping ) {
+			if ( empty( $mapping['page_id'] ) || empty( $mapping['post_type'] ) || $post_type !== $mapping['post_type'] ) {
+				continue;
+			}
+			$path = wp_parse_url( get_permalink( (int) $mapping['page_id'] ), PHP_URL_PATH );
+			if ( is_string( $path ) && '' !== $path ) {
+				Singular_Markdown_Generator::schedule_archive_regeneration( $path );
+			}
+		}
+	}
+
+	/**
+	 * Refresh a listing page when the page itself changes.
+	 *
+	 * @param int $post_id Post ID.
+	 */
+	private function schedule_listing_page_if_configured( $post_id ) {
+		$post_id = (int) $post_id;
+		if ( $post_id <= 0 ) {
+			return;
+		}
+		foreach ( Singular_Markdown_Settings::get_listing_pages() as $mapping ) {
+			if ( empty( $mapping['page_id'] ) || (int) $mapping['page_id'] !== $post_id ) {
+				continue;
+			}
+			$path = wp_parse_url( get_permalink( $post_id ), PHP_URL_PATH );
+			if ( is_string( $path ) && '' !== $path ) {
+				Singular_Markdown_Generator::schedule_archive_regeneration( $path );
+			}
+		}
 	}
 
 	/**

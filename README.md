@@ -4,7 +4,7 @@ WordPress plugin (theme-agnostic) that:
 
 - Caches a Markdown representation of each **eligible** singular URL under `wp-content/uploads/singular-markdown-cache/`.
 - Serves it at the same path as the HTML permalink with `.md` appended (rewrite rules), for example `/about/` → `/about.md`.
-- Adds `Link: </path.md>; rel="alternate"; type="text/markdown"` on HTML singular responses.
+- Adds both an HTTP `Link` header and a `<link rel="alternate" type="text/markdown" href="...">` tag in `<head>` on eligible HTML singular/archive responses.
 - Queues regeneration on save, trash, delete, and supports background full regeneration from **Settings → Singular Markdown**.
 
 After install or update, open **Settings → Permalinks** and click **Save** once if `.md` URLs return 404 (rewrite flush).
@@ -17,6 +17,8 @@ After install or update, open **Settings → Permalinks** and click **Save** onc
 4. **Convert** — page title as `#` heading, duplicate leading `h1` removed when it matches the title, block HTML → Markdown, then the `singular_markdown_output` filter.
 
 Automatic conversion runs in scheduled background jobs. Public `.md` requests do **not** run HTML fetching or conversion synchronously: if no cache exists yet, the request queues generation and returns `503 Retry-After`; if stale cache exists, stale Markdown is served while regeneration is queued.
+
+Archive/home Markdown (for example `/blog.md` or category archive `.md` URLs) is generated from the archive query: `# Archive Title`, then a list of eligible posts with `## [Post Title](permalink)` and each post excerpt/trimmed content. Archive caches use a short TTL and regenerate in the background.
 
 ## Per-post custom Markdown
 
@@ -48,6 +50,7 @@ Developers can override the final decision with filters (see below).
 - Exclude specific post IDs (comma-separated).
 - Force-include post IDs (comma-separated).
 - Exclude by taxonomy term (one per line: `taxonomy:term_id` or `taxonomy:term-slug`).
+- **Listing pages**: map normal WordPress pages to a post type when those pages use a template to display posts. Their `.md` URLs are generated as archive-style post lists.
 - Optional **main content selectors** (one per line: tag, `#id`, or `.class` only). Tried in order, then built-in fallbacks.
 - **Extra strip selectors** (one per line) — removed from the main fragment after the built-in strip list (cookie banners, sidebars, etc.).
 - **HTML fetch timeout** (5–120 seconds) for loading the public HTML before conversion.
@@ -67,6 +70,10 @@ Developers can override the final decision with filters (see below).
 - `singular_markdown_fetch_timeout` — `(int $timeout, int $post_id)` seconds for the HTML fetch request.
 - `singular_markdown_cache_control` — `(string $header, int $post_id)` Cache-Control header for successful `.md` responses.
 - `singular_markdown_cache_eligibility` — `(bool $cache, int $post_id)` whether to cache eligibility decisions for five minutes.
+- `singular_markdown_listing_posts_per_page` — `(int $posts_per_page, array $mapping)` number of posts in configured listing page Markdown.
+- `singular_markdown_archive_output` — `(string $markdown, string $slug_path, WP_Query $query)` final archive Markdown.
+- `singular_markdown_archive_title` — `(string $title, string $slug_path, WP_Query $query)` archive Markdown heading.
+- `singular_markdown_archive_cache_ttl` — `(int $ttl, string $slug_path)` archive cache TTL in seconds.
 
 ## Internal query vars
 
@@ -74,12 +81,14 @@ Rewrite uses short internal vars `sing_md` and `sing_md_path` (not part of the p
 
 ## Manual verification
 
-1. Publish a normal page: HTML has `Link` header to `.md`; `/path.md` returns cached Markdown after background generation (a first uncached request may return `503 Retry-After`).
+1. Publish a normal page: HTML has `Link` header and a `<link rel="alternate" type="text/markdown" href="...">` tag; `/path.md` returns cached Markdown after background generation (a first uncached request may return `503 Retry-After`).
 2. Unpublish or trash: `.md` returns 404; cache file removed after save/cron.
 3. Add post ID to **Exclude post IDs**: `.md` and `Link` disappear; cache purged on save/regenerate.
 4. Mark post **noindex** in Yoast (or another supported SEO plugin): excluded unless force-included.
 5. **Force-include** a noindex post ID: `.md` is served again (not password-protected).
 6. **Diagnostics** with post ID or URL shows expected `code` and message.
+7. Open a posts/archive page such as `/blog/`: HTML has the `<head>` alternate tag; `/blog.md` contains the archive title and post entries after background generation.
+8. Configure a **Listing page** mapping such as `News → post`: `/news.md` contains the selected post type listing instead of only the page body.
 
 ## Uninstall
 

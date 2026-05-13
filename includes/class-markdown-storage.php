@@ -16,6 +16,8 @@ class Singular_Markdown_Storage {
 
 	const CACHE_SUBDIR = 'singular-markdown-cache';
 
+	const ARCHIVE_PREFIX = 'archive-';
+
 	/**
 	 * Cache directory path (trailing slash).
 	 *
@@ -88,11 +90,43 @@ class Singular_Markdown_Storage {
 	}
 
 	/**
+	 * Cache key for archive paths.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 * @return string
+	 */
+	public static function get_archive_key( $slug_path ) {
+		$slug_path = trim( (string) $slug_path, '/' );
+		return self::ARCHIVE_PREFIX . md5( $slug_path );
+	}
+
+	/**
+	 * @param string $slug_path Archive path without .md.
+	 * @return string
+	 */
+	public static function get_archive_file_path( $slug_path ) {
+		return self::get_cache_dir() . self::get_archive_key( $slug_path ) . '.md';
+	}
+
+	/**
 	 * @param int $post_id Post ID.
 	 * @return string|false
 	 */
 	public static function read( $post_id ) {
 		$file = self::get_file_path( $post_id );
+		if ( ! is_readable( $file ) ) {
+			return false;
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		return file_get_contents( $file );
+	}
+
+	/**
+	 * @param string $slug_path Archive path without .md.
+	 * @return string|false
+	 */
+	public static function read_archive( $slug_path ) {
+		$file = self::get_archive_file_path( $slug_path );
 		if ( ! is_readable( $file ) ) {
 			return false;
 		}
@@ -110,6 +144,28 @@ class Singular_Markdown_Storage {
 			return false;
 		}
 		$file = self::get_file_path( $post_id );
+		return self::write_file_atomic( $file, $markdown );
+	}
+
+	/**
+	 * @param string $slug_path Archive path without .md.
+	 * @param string $markdown  Content.
+	 * @return bool
+	 */
+	public static function write_archive( $slug_path, $markdown ) {
+		if ( ! self::ensure_directory() ) {
+			return false;
+		}
+		$file = self::get_archive_file_path( $slug_path );
+		return self::write_file_atomic( $file, $markdown );
+	}
+
+	/**
+	 * @param string $file     Destination file.
+	 * @param string $markdown Content.
+	 * @return bool
+	 */
+	private static function write_file_atomic( $file, $markdown ) {
 		$tmp  = $file . '.' . str_replace( '.', '', uniqid( 'tmp-', true ) ) . '.tmp';
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_file_put_contents
 		if ( false === file_put_contents( $tmp, $markdown ) ) {
@@ -135,6 +191,34 @@ class Singular_Markdown_Storage {
 		}
 		$mtime = filemtime( $file );
 		return false === $mtime ? false : (int) $mtime;
+	}
+
+	/**
+	 * @param string $slug_path Archive path without .md.
+	 * @return int|false Unix timestamp or false.
+	 */
+	public static function get_archive_modified_time( $slug_path ) {
+		$file = self::get_archive_file_path( $slug_path );
+		if ( ! is_readable( $file ) ) {
+			return false;
+		}
+		$mtime = filemtime( $file );
+		return false === $mtime ? false : (int) $mtime;
+	}
+
+	/**
+	 * Whether archive cache is older than the allowed TTL.
+	 *
+	 * @param string $slug_path Archive path without .md.
+	 * @return bool
+	 */
+	public static function is_archive_stale( $slug_path ) {
+		$mtime = self::get_archive_modified_time( $slug_path );
+		if ( false === $mtime ) {
+			return true;
+		}
+		$ttl = (int) apply_filters( 'singular_markdown_archive_cache_ttl', 5 * MINUTE_IN_SECONDS, $slug_path );
+		return $ttl > 0 && $mtime < ( time() - $ttl );
 	}
 
 	/**
