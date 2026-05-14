@@ -437,8 +437,7 @@ class Singular_Markdown_Generator {
 			}
 		}
 
-		$markdown = preg_replace( "/\n{3,}/", "\n\n", $markdown );
-		$markdown = trim( $markdown ) . "\n";
+		$markdown = self::normalize_markdown_output( $markdown );
 
 		return apply_filters( 'singular_markdown_archive_output', $markdown, $slug_path, $query );
 	}
@@ -628,8 +627,7 @@ class Singular_Markdown_Generator {
 		$markdown  = '# ' . self::escape_md_heading_text( $title ) . "\n\n";
 		$markdown .= self::convert_children( $body, 1 );
 
-		$markdown = preg_replace( "/\n{3,}/", "\n\n", $markdown );
-		$markdown = trim( $markdown ) . "\n";
+		$markdown = self::normalize_markdown_output( $markdown );
 
 		/**
 		 * Filter final Markdown output.
@@ -902,7 +900,8 @@ class Singular_Markdown_Generator {
 	 */
 	private static function convert_node( DOMNode $node, $heading_bump = 1 ) {
 		if ( XML_TEXT_NODE === $node->nodeType ) {
-			return self::escape_md_inline( $node->nodeValue );
+			$text = self::normalize_block_text( $node->nodeValue );
+			return '' === $text ? '' : self::escape_md_inline( $text ) . "\n\n";
 		}
 		if ( XML_COMMENT_NODE === $node->nodeType ) {
 			return '';
@@ -934,7 +933,11 @@ class Singular_Markdown_Generator {
 				return '' === $t ? '' : $t . "\n\n";
 
 			case 'br':
-				return "\n";
+				return '';
+
+			case 'a':
+				$t = trim( self::convert_link_element( $node ) );
+				return '' === $t ? '' : $t . "\n\n";
 
 			case 'blockquote':
 				$inner = trim( self::convert_children( $node, $heading_bump ) );
@@ -1112,7 +1115,7 @@ class Singular_Markdown_Generator {
 		$out = '';
 		foreach ( iterator_to_array( $el->childNodes ) as $child ) {
 			if ( XML_TEXT_NODE === $child->nodeType ) {
-				$out .= self::escape_md_inline( $child->nodeValue );
+				$out .= self::escape_md_inline( self::normalize_inline_text( $child->nodeValue ) );
 				continue;
 			}
 			if ( ! ( $child instanceof DOMElement ) ) {
@@ -1135,16 +1138,10 @@ class Singular_Markdown_Generator {
 					$out  .= '`' . str_replace( '`', '\`', $inner ) . '`';
 					break;
 				case 'a':
-					$href = $child->getAttribute( 'href' );
-					$txt  = trim( self::convert_inline_children( $child ) );
-					if ( '' === $href ) {
-						$out .= $txt;
-						break;
-					}
-					$out .= '[' . self::escape_md_link_text( $txt ) . '](' . self::escape_md_url( $href ) . ')';
+					$out .= self::convert_link_element( $child );
 					break;
 				case 'br':
-					$out .= "\n";
+					$out .= ' ';
 					break;
 				default:
 					$out .= self::convert_inline_children( $child );
@@ -1152,6 +1149,24 @@ class Singular_Markdown_Generator {
 			}
 		}
 		return $out;
+	}
+
+	/**
+	 * Convert an anchor element to Markdown link text.
+	 *
+	 * @param DOMElement $el Link element.
+	 * @return string
+	 */
+	private static function convert_link_element( DOMElement $el ) {
+		$href = $el->getAttribute( 'href' );
+		$txt  = trim( preg_replace( '/\s+/u', ' ', self::convert_inline_children( $el ) ) );
+		if ( '' === $txt ) {
+			return '';
+		}
+		if ( '' === $href ) {
+			return $txt;
+		}
+		return '[' . self::escape_md_link_text( $txt ) . '](' . self::escape_md_url( $href ) . ')';
 	}
 
 	/**
@@ -1187,6 +1202,57 @@ class Singular_Markdown_Generator {
 	private static function escape_md_inline( $text ) {
 		$text = html_entity_decode( (string) $text, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 		return str_replace( array( "\r\n", "\r" ), "\n", $text );
+	}
+
+	/**
+	 * Normalize text nodes that appear directly in block-level conversion.
+	 *
+	 * @param string $text Text.
+	 * @return string
+	 */
+	private static function normalize_block_text( $text ) {
+		$text = html_entity_decode( (string) $text, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+		$text = preg_replace( '/\s+/u', ' ', $text );
+		return trim( (string) $text );
+	}
+
+	/**
+	 * Normalize text nodes inside inline conversion while preserving edge spacing.
+	 *
+	 * @param string $text Text.
+	 * @return string
+	 */
+	private static function normalize_inline_text( $text ) {
+		$text = html_entity_decode( (string) $text, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+		if ( '' === trim( $text ) ) {
+			return '';
+		}
+
+		$leading  = preg_match( '/^\s/u', $text ) ? ' ' : '';
+		$trailing = preg_match( '/\s$/u', $text ) ? ' ' : '';
+		$text     = preg_replace( '/\s+/u', ' ', trim( $text ) );
+		return $leading . (string) $text . $trailing;
+	}
+
+	/**
+	 * Remove template indentation and excessive blank lines from generated Markdown.
+	 *
+	 * @param string $markdown Markdown.
+	 * @return string
+	 */
+	private static function normalize_markdown_output( $markdown ) {
+		$markdown = str_replace( array( "\r\n", "\r" ), "\n", (string) $markdown );
+		$lines    = explode( "\n", $markdown );
+		$lines    = array_map( 'trim', $lines );
+		$lines    = array_map(
+			static function ( $line ) {
+				return preg_replace( '/[ \t]{2,}/', ' ', $line );
+			},
+			$lines
+		);
+		$markdown = implode( "\n", $lines );
+		$markdown = preg_replace( "/\n{3,}/", "\n\n", $markdown );
+		return trim( (string) $markdown ) . "\n";
 	}
 
 	/**
