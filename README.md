@@ -56,6 +56,7 @@ Developers can override the final decision with filters (see below).
 - **HTML fetch timeout** (5–120 seconds) for loading the public HTML before conversion.
 - **Eligibility diagnostics**: enter a post ID or front-end URL to see eligibility, reason code, and message.
 - **Purge ineligible cache files**: removes cached `.md` files for posts that no longer qualify (no full regeneration).
+- **Purge all Markdown cache and regenerate**: removes every cached `.md` file, including archive/listing cache, then schedules background regeneration. Use after changing strip selectors or generation logic.
 - **Save settings** / **Regenerate**: also purges ineligible cache files and schedules a background regeneration.
 - **Per-post meta box** (edit screen): choose automatic Markdown from HTML or **custom Markdown** for that entry (included post types only).
 

@@ -250,6 +250,18 @@ class Singular_Markdown_Settings {
 			return;
 		}
 
+		if ( isset( $_POST['singular_md_purge_all_cache'] ) ) {
+			if ( ! isset( $_POST['singular_md_purge_all_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['singular_md_purge_all_nonce'] ) ), 'singular_md_purge_all_cache' ) ) {
+				return;
+			}
+			$n = Singular_Markdown_Storage::purge_all();
+			self::schedule_full_regeneration();
+			self::schedule_listing_pages_regeneration();
+			/* translators: %d: number of cache files removed */
+			add_settings_error( 'singular_markdown', 'purged_all', sprintf( _n( 'Removed %d Markdown cache file and scheduled regeneration.', 'Removed %d Markdown cache files and scheduled regeneration.', $n, 'singular-markdown' ), $n ), 'success' );
+			return;
+		}
+
 		if ( isset( $_POST['singular_md_diagnose'] ) ) {
 			if ( ! isset( $_POST['singular_md_diag_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['singular_md_diag_nonce'] ) ), 'singular_md_diagnose' ) ) {
 				return;
@@ -561,6 +573,12 @@ class Singular_Markdown_Settings {
 				<?php wp_nonce_field( 'singular_md_purge_cache', 'singular_md_purge_nonce' ); ?>
 				<p class="description"><?php esc_html_e( 'Remove Markdown cache files for posts that are no longer eligible (without scheduling a full regeneration).', 'singular-markdown' ); ?></p>
 				<p><button type="submit" name="singular_md_purge_cache" class="button" value="1"><?php esc_html_e( 'Purge ineligible cache files', 'singular-markdown' ); ?></button></p>
+			</form>
+
+			<form method="post" style="margin-top:12px;">
+				<?php wp_nonce_field( 'singular_md_purge_all_cache', 'singular_md_purge_all_nonce' ); ?>
+				<p class="description"><strong><?php esc_html_e( 'Use after changing generation logic or strip selectors.', 'singular-markdown' ); ?></strong> <?php esc_html_e( 'This removes every cached Markdown file, including archive/listing cache, then schedules background regeneration. First uncached .md requests may temporarily return 503 Retry-After while cron rebuilds them.', 'singular-markdown' ); ?></p>
+				<p><button type="submit" name="singular_md_purge_all_cache" class="button button-secondary" value="1" onclick="return confirm('<?php echo esc_js( __( 'Delete all Markdown cache files and schedule background regeneration?', 'singular-markdown' ) ); ?>');"><?php esc_html_e( 'Purge all Markdown cache and regenerate', 'singular-markdown' ); ?></button></p>
 			</form>
 		</div>
 		<?php

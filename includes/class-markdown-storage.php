@@ -271,6 +271,33 @@ class Singular_Markdown_Storage {
 	}
 
 	/**
+	 * Remove all cached Markdown files, including archive/listing cache files.
+	 *
+	 * @return int Number of files removed.
+	 */
+	public static function purge_all() {
+		$dir = self::get_cache_dir();
+		if ( '' === $dir || ! is_dir( $dir ) ) {
+			return 0;
+		}
+
+		$files = glob( trailingslashit( $dir ) . '*.md' );
+		if ( ! is_array( $files ) ) {
+			return 0;
+		}
+
+		$removed = 0;
+		foreach ( $files as $file ) {
+			if ( is_string( $file ) && is_file( $file ) ) {
+				wp_delete_file( $file );
+				++$removed;
+			}
+		}
+
+		return $removed;
+	}
+
+	/**
 	 * Whether the cache file is older than the post's last modified time.
 	 *
 	 * @param int $post_id Post ID.
