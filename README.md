@@ -71,6 +71,7 @@ Developers can override the final decision with filters (see below).
 - `singular_markdown_cache_control` — `(string $header, int $post_id)` Cache-Control header for successful `.md` responses.
 - `singular_markdown_cache_eligibility` — `(bool $cache, int $post_id)` whether to cache eligibility decisions for five minutes.
 - `singular_markdown_listing_posts_per_page` — `(int $posts_per_page, array $mapping)` number of posts in configured listing page Markdown.
+- `singular_markdown_archive_image_size` — `(string|int[] $size, WP_Post $post)` featured image size for archive/listing Markdown entries. Default: `medium`.
 - `singular_markdown_archive_output` — `(string $markdown, string $slug_path, WP_Query $query)` final archive Markdown.
 - `singular_markdown_archive_title` — `(string $title, string $slug_path, WP_Query $query)` archive Markdown heading.
 - `singular_markdown_archive_cache_ttl` — `(int $ttl, string $slug_path)` archive cache TTL in seconds.
@@ -87,7 +88,7 @@ Rewrite uses short internal vars `sing_md` and `sing_md_path` (not part of the p
 4. Mark post **noindex** in Yoast (or another supported SEO plugin): excluded unless force-included.
 5. **Force-include** a noindex post ID: `.md` is served again (not password-protected).
 6. **Diagnostics** with post ID or URL shows expected `code` and message.
-7. Open a posts/archive page such as `/blog/`: HTML has the `<head>` alternate tag; `/blog.md` contains the archive title and post entries after background generation.
+7. Open a posts/archive page such as `/blog/`: HTML has the `<head>` alternate tag; `/blog.md` contains the archive title, featured images when available, and post entries after background generation.
 8. Configure a **Listing page** mapping such as `News → post`: `/news.md` contains the selected post type listing instead of only the page body.
 
 ## Uninstall

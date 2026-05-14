@@ -426,6 +426,10 @@ class Singular_Markdown_Generator {
 				continue;
 			}
 
+			$image = self::archive_post_image_markdown( $post, $url, $post_title );
+			if ( '' !== $image ) {
+				$markdown .= $image . "\n\n";
+			}
 			$markdown .= '## [' . self::escape_md_link_text( $post_title ) . '](' . self::escape_md_url( $url ) . ")\n\n";
 			$excerpt = self::archive_post_excerpt( $post );
 			if ( '' !== $excerpt ) {
@@ -472,6 +476,33 @@ class Singular_Markdown_Generator {
 
 		$title = html_entity_decode( wp_strip_all_tags( (string) $title ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 		return (string) apply_filters( 'singular_markdown_archive_title', $title, $slug_path, $query );
+	}
+
+	/**
+	 * Featured image Markdown for archive/listing entries.
+	 *
+	 * @param WP_Post $post       Post.
+	 * @param string  $post_url   Post permalink.
+	 * @param string  $post_title Plain post title.
+	 * @return string
+	 */
+	private static function archive_post_image_markdown( WP_Post $post, $post_url, $post_title ) {
+		$thumbnail_id = get_post_thumbnail_id( $post );
+		if ( ! $thumbnail_id ) {
+			return '';
+		}
+
+		$size = apply_filters( 'singular_markdown_archive_image_size', 'medium', $post );
+		$url  = wp_get_attachment_image_url( $thumbnail_id, $size );
+		if ( ! $url ) {
+			return '';
+		}
+
+		$alt = get_post_meta( $thumbnail_id, '_wp_attachment_image_alt', true );
+		$alt = '' !== trim( (string) $alt ) ? $alt : $post_title;
+		$alt = html_entity_decode( wp_strip_all_tags( (string) $alt ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+
+		return '[![' . self::escape_md_alt( $alt ) . '](' . self::escape_md_url( $url ) . ')](' . self::escape_md_url( $post_url ) . ')';
 	}
 
 	/**
