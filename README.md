@@ -68,6 +68,7 @@ Developers can override the final decision with filters (see below).
 - `singular_markdown_is_post_eligible` — `(bool $eligible, int $post_id)` after built-in rules; return `false` to exclude or `true` to include.
 - `singular_markdown_eligibility` — `(array $result, int $post_id)` with keys `eligible`, `code`, `message`; adjust or replace the full diagnostic result.
 - `singular_markdown_fetch_timeout` — `(int $timeout, int $post_id)` seconds for the HTML fetch request.
+- `singular_markdown_retry_fetch_without_sslverify` — `(bool $allowed, int $post_id, string $url, WP_Error $error)` allows one local/self-signed HTTPS retry without SSL verification when the initial rendered HTML fetch fails. Defaults to local/development or `.local` hosts only.
 - `singular_markdown_cache_control` — `(string $header, int $post_id)` Cache-Control header for successful `.md` responses.
 - `singular_markdown_cache_eligibility` — `(bool $cache, int $post_id)` whether to cache eligibility decisions for five minutes.
 - `singular_markdown_listing_posts_per_page` — `(int $posts_per_page, array $mapping)` number of posts in configured listing page Markdown.

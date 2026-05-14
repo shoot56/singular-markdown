@@ -663,16 +663,20 @@ class Singular_Markdown_Generator {
 		 */
 		$timeout = (int) apply_filters( 'singular_markdown_fetch_timeout', $timeout, $post_id );
 
-		$response = wp_remote_get(
-			$url,
-			array(
-				'timeout'     => $timeout,
-				'redirection' => 5,
-				'headers'     => array(
-					'Accept' => 'text/html,application/xhtml+xml',
-				),
-			)
+		$args = array(
+			'timeout'     => $timeout,
+			'redirection' => 5,
+			'headers'     => array(
+				'Accept' => 'text/html,application/xhtml+xml',
+			),
 		);
+
+		$response = wp_remote_get( $url, $args );
+
+		if ( is_wp_error( $response ) && self::should_retry_fetch_without_ssl_verification( $url, $post_id, $response ) ) {
+			$args['sslverify'] = false;
+			$response          = wp_remote_get( $url, $args );
+		}
 
 		if ( is_wp_error( $response ) ) {
 			return false;
@@ -685,6 +689,38 @@ class Singular_Markdown_Generator {
 
 		$body = wp_remote_retrieve_body( $response );
 		return is_string( $body ) ? $body : false;
+	}
+
+	/**
+	 * Whether to retry rendered HTML fetch without SSL verification.
+	 *
+	 * This is intended for local loopback requests with self-signed certificates.
+	 * Production keeps SSL verification unless explicitly overridden by filter.
+	 *
+	 * @param string   $url      Permalink being fetched.
+	 * @param int      $post_id  Post ID.
+	 * @param WP_Error $error    Initial request error.
+	 * @return bool
+	 */
+	private static function should_retry_fetch_without_ssl_verification( $url, $post_id, WP_Error $error ) {
+		if ( 'https' !== wp_parse_url( $url, PHP_URL_SCHEME ) ) {
+			return false;
+		}
+
+		$host        = wp_parse_url( $url, PHP_URL_HOST );
+		$host        = is_string( $host ) ? strtolower( $host ) : '';
+		$environment = function_exists( 'wp_get_environment_type' ) ? wp_get_environment_type() : 'production';
+		$allowed     = in_array( $environment, array( 'local', 'development' ), true ) || ( '' !== $host && preg_match( '/(^|\.)local$/', $host ) );
+
+		/**
+		 * Allow local/self-signed SSL retry for rendered HTML fetches.
+		 *
+		 * @param bool     $allowed Whether retry is allowed.
+		 * @param int      $post_id Post ID.
+		 * @param string   $url     Permalink being fetched.
+		 * @param WP_Error $error   Initial request error.
+		 */
+		return (bool) apply_filters( 'singular_markdown_retry_fetch_without_sslverify', $allowed, $post_id, $url, $error );
 	}
 
 	/**
