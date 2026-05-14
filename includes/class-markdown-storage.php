@@ -298,6 +298,78 @@ class Singular_Markdown_Storage {
 	}
 
 	/**
+	 * Lightweight cache status for the settings screen.
+	 *
+	 * @param int $recent_limit Number of recent files to include.
+	 * @return array<string,mixed>
+	 */
+	public static function get_cache_status( $recent_limit = 10 ) {
+		$dir = self::get_cache_dir();
+		$out = array(
+			'directory'      => $dir,
+			'total'          => 0,
+			'singular'       => 0,
+			'archive'        => 0,
+			'total_size'     => 0,
+			'newest_mtime'   => false,
+			'recent'         => array(),
+		);
+		if ( '' === $dir || ! is_dir( $dir ) ) {
+			return $out;
+		}
+
+		$files = glob( trailingslashit( $dir ) . '*.md' );
+		if ( ! is_array( $files ) ) {
+			return $out;
+		}
+
+		$recent_limit   = max( 0, (int) $recent_limit );
+		$include_recent = $recent_limit > 0;
+		$recent         = array();
+		foreach ( $files as $file ) {
+			if ( ! is_string( $file ) || ! is_file( $file ) ) {
+				continue;
+			}
+
+			$base  = basename( $file, '.md' );
+			$size  = filesize( $file );
+			$mtime = filemtime( $file );
+			$size  = false === $size ? 0 : (int) $size;
+			$mtime = false === $mtime ? 0 : (int) $mtime;
+			$type  = ctype_digit( (string) $base ) ? 'singular' : 'archive';
+
+			++$out['total'];
+			++$out[ $type ];
+			$out['total_size'] += $size;
+			if ( false === $out['newest_mtime'] || $mtime > (int) $out['newest_mtime'] ) {
+				$out['newest_mtime'] = $mtime;
+			}
+
+			if ( $include_recent ) {
+				$recent[] = array(
+					'key'     => $base,
+					'type'    => $type,
+					'post_id' => 'singular' === $type ? (int) $base : 0,
+					'size'    => $size,
+					'mtime'   => $mtime,
+				);
+			}
+		}
+
+		if ( $include_recent ) {
+			usort(
+				$recent,
+				static function ( $a, $b ) {
+					return (int) $b['mtime'] <=> (int) $a['mtime'];
+				}
+			);
+			$out['recent'] = array_slice( $recent, 0, $recent_limit );
+		}
+
+		return $out;
+	}
+
+	/**
 	 * Whether the cache file is older than the post's last modified time.
 	 *
 	 * @param int $post_id Post ID.

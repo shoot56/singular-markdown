@@ -384,6 +384,69 @@ class Singular_Markdown_Settings {
 	}
 
 	/**
+	 * Approximate regeneration status from stored batch offset and scheduled cron.
+	 *
+	 * @param int $total Approximate total published items.
+	 * @return array<string,mixed>
+	 */
+	private static function get_regeneration_status( $total ) {
+		$opts         = self::get_options();
+		$offset       = isset( $opts['batch_offset'] ) ? max( 0, (int) $opts['batch_offset'] ) : 0;
+		$total        = max( 0, (int) $total );
+		$scheduled    = wp_next_scheduled( self::CRON_HOOK_BATCH );
+		$percent      = $total > 0 ? min( 100, (int) floor( ( $offset / $total ) * 100 ) ) : 0;
+		$post_jobs    = self::count_scheduled_hook_events( Singular_Markdown_Generator::CRON_HOOK_GENERATE );
+		$archive_jobs = self::count_scheduled_hook_events( Singular_Markdown_Generator::CRON_HOOK_GENERATE_ARCHIVE );
+
+		if ( $scheduled && $offset > 0 ) {
+			$status = __( 'Regeneration in progress', 'singular-markdown' );
+		} elseif ( $scheduled ) {
+			$status = __( 'Regeneration scheduled', 'singular-markdown' );
+		} elseif ( $offset > 0 && ( 0 === $total || $offset < $total ) ) {
+			$status = __( 'Regeneration paused - no batch is scheduled', 'singular-markdown' );
+		} else {
+			$status = __( 'Idle', 'singular-markdown' );
+		}
+
+		return array(
+			'offset'       => $offset,
+			'total'        => $total,
+			'percent'      => $percent,
+			'scheduled'    => $scheduled,
+			'status'       => $status,
+			'post_jobs'    => $post_jobs,
+			'archive_jobs' => $archive_jobs,
+		);
+	}
+
+	/**
+	 * Count scheduled cron events for hooks that may have different arguments.
+	 *
+	 * @param string $hook Hook name.
+	 * @return int
+	 */
+	private static function count_scheduled_hook_events( $hook ) {
+		if ( ! function_exists( '_get_cron_array' ) ) {
+			return 0;
+		}
+
+		$count = 0;
+		$cron  = _get_cron_array();
+		if ( ! is_array( $cron ) ) {
+			return 0;
+		}
+
+		foreach ( $cron as $timestamp => $hooks ) {
+			unset( $timestamp );
+			if ( isset( $hooks[ $hook ] ) && is_array( $hooks[ $hook ] ) ) {
+				$count += count( $hooks[ $hook ] );
+			}
+		}
+
+		return $count;
+	}
+
+	/**
 	 * Render settings page.
 	 */
 	public static function render_page() {
@@ -423,6 +486,8 @@ class Singular_Markdown_Settings {
 		unset( $post_type_choices['attachment'] );
 
 		$counts_note = Singular_Markdown_Post_Type_Registry::count_published_approx();
+		$cache_status = Singular_Markdown_Storage::get_cache_status( 0 );
+		$regen_status = self::get_regeneration_status( $counts_note );
 
 		$diag_out = get_transient( self::DIAG_TRANSIENT_PREFIX . get_current_user_id() );
 		if ( is_string( $diag_out ) && '' !== $diag_out ) {
@@ -435,6 +500,84 @@ class Singular_Markdown_Settings {
 			<h1><?php esc_html_e( 'Singular Markdown', 'singular-markdown' ); ?></h1>
 			<p><?php esc_html_e( 'Markdown alternates are served at the same path as HTML with a .md extension. Cache files are stored under uploads (not publicly listed).', 'singular-markdown' ); ?></p>
 			<p><strong><?php esc_html_e( 'Approximate published items in included types:', 'singular-markdown' ); ?></strong> <?php echo esc_html( (string) $counts_note ); ?></p>
+
+			<h2><?php esc_html_e( 'Cache status', 'singular-markdown' ); ?></h2>
+			<table class="widefat striped" style="max-width:900px;">
+				<tbody>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Cached Markdown files', 'singular-markdown' ); ?></th>
+						<td>
+							<?php
+							printf(
+								/* translators: 1: total files, 2: singular files, 3: archive files */
+								esc_html__( '%1$d total (%2$d singular, %3$d archive/listing)', 'singular-markdown' ),
+								(int) $cache_status['total'],
+								(int) $cache_status['singular'],
+								(int) $cache_status['archive']
+							);
+							?>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Cache size', 'singular-markdown' ); ?></th>
+						<td><?php echo esc_html( size_format( (int) $cache_status['total_size'], 2 ) ); ?></td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Newest cache file', 'singular-markdown' ); ?></th>
+						<td>
+							<?php
+							echo ! empty( $cache_status['newest_mtime'] )
+								? esc_html( wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int) $cache_status['newest_mtime'] ) )
+								: esc_html__( 'None yet', 'singular-markdown' );
+							?>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Regeneration status', 'singular-markdown' ); ?></th>
+						<td>
+							<strong><?php echo esc_html( (string) $regen_status['status'] ); ?></strong>
+							<?php if ( (int) $regen_status['total'] > 0 ) : ?>
+								<br />
+								<?php
+								printf(
+									/* translators: 1: processed offset, 2: total items, 3: percent */
+									esc_html__( 'Approx. progress: %1$d / %2$d (%3$d%%)', 'singular-markdown' ),
+									(int) $regen_status['offset'],
+									(int) $regen_status['total'],
+									(int) $regen_status['percent']
+								);
+								?>
+							<?php endif; ?>
+							<?php if ( ! empty( $regen_status['scheduled'] ) ) : ?>
+								<br />
+								<?php
+								printf(
+									/* translators: %s: scheduled time */
+									esc_html__( 'Next batch is scheduled for %s.', 'singular-markdown' ),
+									esc_html( wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (int) $regen_status['scheduled'] ) )
+								);
+								?>
+							<?php elseif ( (int) $regen_status['offset'] > 0 && (int) $regen_status['offset'] < (int) $regen_status['total'] ) : ?>
+								<br />
+								<?php esc_html_e( 'No batch cron is currently scheduled. Click "Regenerate Markdown files" to resume the background process.', 'singular-markdown' ); ?>
+							<?php endif; ?>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Queued single-item jobs', 'singular-markdown' ); ?></th>
+						<td>
+							<?php
+							printf(
+								/* translators: 1: post jobs, 2: archive jobs */
+								esc_html__( '%1$d post jobs, %2$d archive/listing jobs', 'singular-markdown' ),
+								(int) $regen_status['post_jobs'],
+								(int) $regen_status['archive_jobs']
+							);
+							?>
+						</td>
+					</tr>
+				</tbody>
+			</table>
 
 			<h2><?php esc_html_e( 'Included post types (default)', 'singular-markdown' ); ?></h2>
 			<table class="widefat striped" style="max-width:640px;">

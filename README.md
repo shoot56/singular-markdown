@@ -54,6 +54,7 @@ Developers can override the final decision with filters (see below).
 - Optional **main content selectors** (one per line: tag, `#id`, or `.class` only). Tried in order, then built-in fallbacks.
 - **Extra strip selectors** (one per line) — removed from the main fragment after the built-in strip list (cookie banners, sidebars, etc.).
 - **HTML fetch timeout** (5–120 seconds) for loading the public HTML before conversion.
+- **Cache status**: shows cached singular/archive file counts, total cache size, newest cache time, approximate background regeneration progress, and queued post/archive jobs. If progress has advanced but no batch cron is scheduled, the status is shown as paused.
 - **Eligibility diagnostics**: enter a post ID or front-end URL to see eligibility, reason code, and message.
 - **Purge ineligible cache files**: removes cached `.md` files for posts that no longer qualify (no full regeneration).
 - **Purge all Markdown cache and regenerate**: removes every cached `.md` file, including archive/listing cache, then schedules background regeneration. Use after changing strip selectors or generation logic.
@@ -89,9 +90,10 @@ Rewrite uses short internal vars `sing_md` and `sing_md_path` (not part of the p
 3. Add post ID to **Exclude post IDs**: `.md` and `Link` disappear; cache purged on save/regenerate.
 4. Mark post **noindex** in Yoast (or another supported SEO plugin): excluded unless force-included.
 5. **Force-include** a noindex post ID: `.md` is served again (not password-protected).
-6. **Diagnostics** with post ID or URL shows expected `code` and message.
-7. Open a posts/archive page such as `/blog/`: HTML has the `<head>` alternate tag; `/blog.md` contains the archive title, featured images when available, and post entries after background generation.
-8. Configure a **Listing page** mapping such as `News → post`: `/news.md` contains the selected post type listing instead of only the page body.
+6. **Cache status** shows cached file counts and background regeneration state after generation starts.
+7. **Diagnostics** with post ID or URL shows expected `code` and message.
+8. Open a posts/archive page such as `/blog/`: HTML has the `<head>` alternate tag; `/blog.md` contains the archive title, featured images when available, and post entries after background generation.
+9. Configure a **Listing page** mapping such as `News → post`: `/news.md` contains the selected post type listing instead of only the page body.
 
 ## Uninstall
 
